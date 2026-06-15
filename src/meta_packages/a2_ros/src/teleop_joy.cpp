@@ -1,5 +1,5 @@
 #include <memory>
-#include <geometry_msgs/msg/twist.hpp>
+#include <geometry_msgs/msg/twist_stamped.hpp>
 #include <sensor_msgs/msg/joy.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -14,7 +14,7 @@ public:
     this->declare_parameter("angular_speed_limit", 2.0);
 
     // Publisher for cmd_vel
-    twist_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+    twist_pub_ = this->create_publisher<geometry_msgs::msg::TwistStamped>("cmd_vel", 10);
     // Publisher for the locomotion mode
     mode_pub_ = this->create_publisher<std_msgs::msg::Int32>("mode", 10);
 
@@ -28,19 +28,21 @@ public:
 private:
   void joy_callback(const sensor_msgs::msg::Joy::SharedPtr msg)
   {
-    auto twist = geometry_msgs::msg::Twist();
+    auto twist = geometry_msgs::msg::TwistStamped();
     auto mode = std_msgs::msg::Int32();
 
     double linear_scale = this->get_parameter("linear_speed_limit").as_double();
     double angular_scale = this->get_parameter("angular_speed_limit").as_double();
 
+    twist.header.stamp = this->now();
+
     // Mapping for standard Gamepad (PS4/Xbox/Logitech)
     // Left Stick Vertical -> Linear X (Forward/Backward)
-    twist.linear.x = msg->axes[1] * linear_scale;
+    twist.twist.linear.x = msg->axes[1] * linear_scale;
     // Left Stick Horizontal -> Linear Y (Strafing)
-    twist.linear.y = msg->axes[0] * linear_scale;
+    twist.twist.linear.y = msg->axes[0] * linear_scale;
     // Right Stick Horizontal -> Angular Z (Yaw/Turning)
-    twist.angular.z = msg->axes[3] * angular_scale;
+    twist.twist.angular.z = msg->axes[3] * angular_scale;
 
     twist_pub_->publish(twist);
 
@@ -61,7 +63,7 @@ private:
     }
   }
 
-  rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr twist_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::TwistStamped>::SharedPtr twist_pub_;
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr mode_pub_;
   rclcpp::Subscription<sensor_msgs::msg::Joy>::SharedPtr joy_sub_;
   int current_mode_ = 0;
