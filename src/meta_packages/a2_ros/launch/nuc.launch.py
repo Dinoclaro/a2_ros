@@ -23,7 +23,12 @@ Usage:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    PopLaunchConfigurations,
+    PushLaunchConfigurations,
+)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, Command
@@ -39,7 +44,7 @@ def generate_launch_description():
 
     rviz_arg = DeclareLaunchArgument(
         'rviz',
-        default_value='false',
+        default_value='true',
         description='Launch RViz2 visualisation'
     )
 
@@ -125,10 +130,17 @@ def generate_launch_description():
     return LaunchDescription([
         rviz_arg,
         lidar_config_arg,
-        bridge_launch,
+        # bridge_launch,
         teleop_launch,
-        camera_launch,
+        # camera_launch,
+        # Scope the 'rviz':'false' override below to lidar_launch only -
+        # without push/pop it overwrites the global 'rviz' LaunchConfiguration,
+        # which also suppresses the rviz_node below.
+        
+        PushLaunchConfigurations(),
         lidar_launch,
+        PopLaunchConfigurations(),
+
         robot_state_pub_node,
         # front_imu_tf_node,
         # rear_imu_tf_node,
