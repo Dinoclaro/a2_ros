@@ -8,7 +8,7 @@ Starts:
   - gscam2             : H.264 multicast camera stream
 
 Usage:
-  ros2 launch a2_ros pc2.launch.py
+  ros2 launch a2_pc2 pc2.launch.py
 """
 
 import os
@@ -21,7 +21,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description():
     bridge_launch_dir = get_package_share_directory('a2_unitree_bridge')
-    a2_ros_launch_dir = os.path.join(get_package_share_directory('a2_ros'), 'launch')
+    a2_pc2_launch_dir = os.path.join(get_package_share_directory('a2_pc2'), 'launch')
 
     bridge_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
@@ -52,7 +52,7 @@ def generate_launch_description():
 
     camera_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
-            os.path.join(a2_ros_launch_dir, 'camera.launch.py')
+            os.path.join(a2_pc2_launch_dir, 'camera.launch.py')
         )
     )
 
