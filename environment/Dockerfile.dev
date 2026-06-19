@@ -3,8 +3,12 @@ ARG ROS_DISTRO=jazzy
 ARG MUJOCO_VERSION=3.5.0
 ARG USER=ubuntu
 
+# Pinned digest — update by running:
+#   docker pull ros:jazzy && docker inspect ros:jazzy --format '{{index .RepoDigests 0}}'
+ARG ROS_IMAGE=ros@sha256:eac11a5285beeb1e1884e71f7091c610e08452e823bfb3f43afaa334375325f6
+
 # Builder image for non-ros dependencies to reduce source code footprint
-FROM ros:$ROS_DISTRO AS builder
+FROM ${ROS_IMAGE} AS builder
 ARG MUJOCO_VERSION
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -25,12 +29,39 @@ RUN cmake -S unitree_sdk2 -B unitree_sdk2/build \
 
 RUN cmake --build "unitree_sdk2/build" --target install -- -j"$(nproc)"
 
-# MuJoCo
+# MuJoCo (architecture-matched: uname -m yields x86_64 / aarch64, which match
+# the MuJoCo release asset names directly).
 RUN mkdir -p /opt/mujoco && \
-    wget -q "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-x86_64.tar.gz" \
+    wget -q "https://github.com/google-deepmind/mujoco/releases/download/${MUJOCO_VERSION}/mujoco-${MUJOCO_VERSION}-linux-$(uname -m).tar.gz" \
     -O /tmp/mujoco.tar.gz && \
     tar -xzf /tmp/mujoco.tar.gz -C /opt/mujoco/ && \
     rm /tmp/mujoco.tar.gz
+
+# MCAP CLI — for offline bag inspection without a running ROS stack
+# Pin to a specific release: https://github.com/foxglove/mcap/releases
+RUN wget -q "https://github.com/foxglove/mcap/releases/latest/download/mcap-linux-amd64" \
+    -O /usr/local/bin/mcap && chmod +x /usr/local/bin/mcap
+
+# ONNX Runtime (architecture-matched). The locomotion controller vendors only
+# an x86_64 build under third_party/; download the build matching the target
+# arch here so arm64 images get a working library too. Consumed by the
+# controller's CMake via the ONNXRUNTIME_ROOT env var set in later stages.
+# The final ln creates the soname symlink (libonnxruntime.so.1) that the
+# executable's DT_NEEDED requires — upstream tarballs ship only lib/
+# libonnxruntime.so -> .so.<version> and omit the intermediate soname link.
+ARG ONNXRUNTIME_VERSION=1.21.0
+RUN mkdir -p /opt/onnxruntime && \
+    case "$(uname -m)" in \
+      x86_64) ORT_ARCH=x64 ;; \
+      aarch64|arm64) ORT_ARCH=aarch64 ;; \
+      *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac && \
+    wget -q "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/onnxruntime-linux-${ORT_ARCH}-${ONNXRUNTIME_VERSION}.tgz" \
+    -O /tmp/onnxruntime.tgz && \
+    tar -xzf /tmp/onnxruntime.tgz -C /opt/onnxruntime --strip-components=1 && \
+    rm /tmp/onnxruntime.tgz && \
+    ln -sf "libonnxruntime.so.${ONNXRUNTIME_VERSION}" \
+           "/opt/onnxruntime/lib/libonnxruntime.so.1"
 
 # Python virtual environments
 # Copy all requirements txt file in the high level one.
@@ -47,9 +78,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # Installs all apt packages and the python venv. Runs as root.                 #
 # No user creation here — keeps this layer stable and user-agnostic.           #
 ################################################################################
-FROM ros:${ROS_DISTRO} AS a2_base
+FROM ${ROS_IMAGE} AS a2_base
 ARG ROS_DISTRO
 
+# System & build tools — changes rarely
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y \
@@ -61,49 +93,84 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     python3-argcomplete \
     python3-pip \
     python3.12-venv \
-    qtdeclarative5-dev \
-    libopencv-dev \
-    libpcap-dev \
+    openssh-client \
     libx11-dev \
+    xorg-dev \
+    qtdeclarative5-dev \
     libyaml-cpp-dev \
     libspdlog-dev \
     libboost-all-dev \
     libfmt-dev \
     libglfw3-dev \
-    xorg-dev \
-    openssh-client \
+    libpcap-dev \
+    libopencv-dev
+
+# ROS core — middleware, control, robot description
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
     ros-${ROS_DISTRO}-rmw-cyclonedds-cpp \
     ros-${ROS_DISTRO}-rmw-zenoh-cpp \
     ros-${ROS_DISTRO}-urdf \
     ros-${ROS_DISTRO}-xacro \
-    ros-${ROS_DISTRO}-rviz2 \
+    ros-${ROS_DISTRO}-urdfdom-py \
+    ros-${ROS_DISTRO}-robot-state-publisher \
+    ros-${ROS_DISTRO}-joy \
     ros-${ROS_DISTRO}-ros2-control \
     ros-${ROS_DISTRO}-ros2-controllers \
     ros-${ROS_DISTRO}-controller-manager \
-    ros-${ROS_DISTRO}-urdfdom-py \
-    ros-${ROS_DISTRO}-joy \
-    ros-${ROS_DISTRO}-robot-state-publisher \
+    ros-${ROS_DISTRO}-twist-mux
+
+# Perception — pointcloud, vision, camera, gstreamer
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
     ros-${ROS_DISTRO}-pcl-conversions \
     ros-${ROS_DISTRO}-pcl-ros \
     ros-${ROS_DISTRO}-cv-bridge \
     ros-${ROS_DISTRO}-vision-opencv \
+    ros-${ROS_DISTRO}-camera-calibration-parsers \
+    ros-${ROS_DISTRO}-camera-info-manager \
+    ros-${ROS_DISTRO}-image-transport \
     libgstreamer1.0-dev \
     libgstreamer-plugins-base1.0-dev \
+    libgstreamer-plugins-good1.0-dev \
     gstreamer1.0-plugins-base \
     gstreamer1.0-plugins-good \
     gstreamer1.0-plugins-bad \
     gstreamer1.0-plugins-ugly \
     gstreamer1.0-libav \
-    gstreamer1.0-tools \
-    ros-${ROS_DISTRO}-camera-calibration-parsers \
-    ros-${ROS_DISTRO}-camera-info-manager \
-    ros-${ROS_DISTRO}-image-transport
+    gstreamer1.0-tools
+
+# Visualization & analysis — most likely to grow
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+    ros-${ROS_DISTRO}-rviz2 \
+    ros-${ROS_DISTRO}-plotjuggler-ros \
+    ros-${ROS_DISTRO}-foxglove-bridge \
+    ros-${ROS_DISTRO}-joint-state-publisher \
+    ros-${ROS_DISTRO}-joint-state-publisher-gui \
+    ros-${ROS_DISTRO}-rqt \
+    ros-${ROS_DISTRO}-rqt-common-plugins \
+    ros-${ROS_DISTRO}-rqt-tf-tree
+
+# Developer tools — most likely to change
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+    tmux \
+    btop \
+    gdb
 
 # empy required by colcon at build time (system Python, not venv)
 RUN python3 -m pip install --break-system-packages "empy==3.3.4"
 
 # Python venv from builder — added to PATH so it's always active
 COPY --from=builder /opt/venv /opt/venv
+
+# MCAP CLI from builder
+COPY --from=builder /usr/local/bin/mcap /usr/local/bin/mcap
 ENV PATH="/opt/venv/bin:$PATH"
 
 ################################################################################
@@ -124,6 +191,12 @@ RUN : "${UID:?UID build arg is required}" && : "${GID:?GID build arg is required
 # Remap to the host UID/GID so bind-mounted files have correct ownership.
 RUN groupmod -g ${GID} ubuntu && usermod -u ${UID} -g ${GID} ubuntu
 
+# Set a password for the user so sudo / interactive login works (dev convenience;
+# the base image ships the account password-locked). Override at build time with
+# --build-arg USER_PASSWORD=... The user is already in the sudo group.
+ARG USER_PASSWORD=robotx
+RUN echo "${USER}:${USER_PASSWORD}" | chpasswd
+
 # Grant access to /dev/input/event* devices. The host input group GID (107) may differ
 # from the container's input group, so we add the user to whatever group owns GID 107.
 ARG INPUT_GID=107
@@ -136,7 +209,8 @@ RUN mkdir -p /home/$USER/.bash_history_dir /home/$USER/.ros && \
     chown -R $USER:$USER /home/$USER/.bash_history_dir /home/$USER/.ros /home/$USER/.sudo_as_admin_successful
 
 COPY environment/shell/.bashrc /home/$USER/.bashrc
-RUN chown $USER:$USER /home/$USER/.bashrc
+COPY environment/shell/.tmux.conf /home/$USER/.tmux.conf
+RUN chown $USER:$USER /home/$USER/.bashrc /home/$USER/.tmux.conf
 
 RUN git clone --depth=1 https://github.com/ohmybash/oh-my-bash.git /home/$USER/.oh-my-bash && \
     chown -R $USER:$USER /home/$USER/.oh-my-bash
@@ -160,6 +234,12 @@ USER $USER
 # Copy everything to cwd
 COPY --chown=$USER:$USER . .
 
+# Install the a2 CLI into PATH (symlink so volume-mounted dev sessions stay in sync)
+USER root
+RUN chmod +x /a2_ros/scripts/a2 && \
+    ln -sf /a2_ros/scripts/a2 /usr/local/bin/a2
+USER $USER
+
 ################################################################################
 # Development Stage. Builds simulation                                         #
 # This version is used to test locally.                                        #
@@ -172,6 +252,10 @@ ENV USER=${USER:-ubuntu}
 
 # Copy Unitree SDK from Builder
 COPY --from=builder /opt/unitree_robotics /opt/unitree_robotics
+
+# Arch-matched ONNX Runtime for the locomotion controller (see builder stage).
+COPY --from=builder /opt/onnxruntime /opt/onnxruntime
+ENV ONNXRUNTIME_ROOT=/opt/onnxruntime
 
 # MuJoCo artifacts from Builder required by unitree_mujoco
 USER root
@@ -199,6 +283,10 @@ ENV USER=${USER:-ubuntu}
 # Copy Unitree SDK from Builder
 COPY --from=builder /opt/unitree_robotics /opt/unitree_robotics
 
+# Arch-matched ONNX Runtime for the locomotion controller (see builder stage).
+COPY --from=builder /opt/onnxruntime /opt/onnxruntime
+ENV ONNXRUNTIME_ROOT=/opt/onnxruntime
+
 USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -221,3 +309,51 @@ ENV COLCON_DEFAULTS_FILE=/a2_ros/environment/colcon/robot.defaults.yaml
 
 # Source ROS environment
 RUN echo "source ${PWD}/scripts/setup.sh" >> /home/$USER/.bashrc
+
+################################################################################
+# VNC Stage (optional, opt-in via the `vnc` compose profile).                  #
+# Adds KasmVNC + a minimal Openbox WM on top of the dev image so GUI tools     #
+# (RViz, the joint_state_publisher GUI, ...) can be viewed in a browser on     #
+# hosts without native X11 (macOS / Windows). NOT part of the default images.  #
+################################################################################
+FROM dev AS vnc
+ARG USER
+ENV USER=${USER:-ubuntu}
+ARG KASMVNC_VERSION=1.3.4
+ARG VNC_PASSWORD=robotx
+
+# No GPU in Docker on macOS/Windows — force Mesa software GL so OpenGL apps
+# (RViz, the MuJoCo viewer) render instead of crashing on missing hardware GL.
+ENV LIBGL_ALWAYS_SOFTWARE=1
+
+USER root
+COPY environment/vnc/setup-kasmvnc.sh /tmp/setup-kasmvnc.sh
+RUN KASMVNC_VERSION="${KASMVNC_VERSION}" bash /tmp/setup-kasmvnc.sh && rm /tmp/setup-kasmvnc.sh
+
+# Session (Openbox) + KasmVNC server config, baked into the user's ~/.vnc.
+COPY --chown=${USER}:${USER} environment/vnc/kasmvnc.yaml /home/${USER}/.vnc/kasmvnc.yaml
+COPY --chown=${USER}:${USER} environment/vnc/xstartup     /home/${USER}/.vnc/xstartup
+RUN chmod +x /home/${USER}/.vnc/xstartup
+
+# Let the user read the snakeoil SSL key (ssl-cert package keeps it root:ssl-cert 0640).
+RUN usermod -aG ssl-cert ${USER}
+
+# Pre-create the X11 socket dir at 1777 (sticky, world-writable, like /tmp) so
+# that when it's backed by the shared `x11` named volume, the X server (running
+# as the unprivileged user) can still create /tmp/.X11-unix/X20 in it, and other
+# containers mounting the same volume can read it.
+RUN mkdir -p /tmp/.X11-unix && chmod 1777 /tmp/.X11-unix
+
+USER $USER
+# Create the VNC password non-interactively (override with --build-arg VNC_PASSWORD=...).
+# Non-fatal: if the kasmvncpasswd flags differ on your KasmVNC build, the image
+# still builds and you can set the password by hand — see the warning in the log.
+RUN printf '%s\n%s\n' "${VNC_PASSWORD}" "${VNC_PASSWORD}" | kasmvncpasswd -u "${USER}" -w \
+    || echo "[kasmvnc] WARNING: password not set — adjust the kasmvncpasswd call for your KasmVNC version"
+
+# Mark the desktop as already chosen so KasmVNC's select-de.sh skips its
+# interactive prompt and uses our Openbox xstartup directly.
+RUN touch /home/${USER}/.vnc/.de-was-selected
+
+# Web desktop is served on 8444 (see environment/vnc/kasmvnc.yaml).
+EXPOSE 8444
