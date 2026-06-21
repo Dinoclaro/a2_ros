@@ -50,7 +50,7 @@ def generate_launch_description():
 
     lidar_config_arg = DeclareLaunchArgument(
         'lidar_config',
-        default_value='config_front.yaml',
+        default_value='config_both.yaml',
         description='Hesai config filename (relative to hesai_ros_driver/config/)'
     )
 
