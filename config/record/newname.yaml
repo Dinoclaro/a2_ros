@@ -6,7 +6,7 @@ topics:
   - /imu/data
   - /registered_scan
   - /front_lidar/points
-  - /rear_lidar/points
+  - /back_lidar/points
   - /tf
   - /tf_static
   - /camera/camera_info
