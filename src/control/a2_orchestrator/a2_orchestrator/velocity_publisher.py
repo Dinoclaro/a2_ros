@@ -8,8 +8,8 @@ class VelocityPublisher(Node):
     def __init__(self):
         super().__init__('velocity_publisher')
         
-        # Topic is /cmd_vel (expected by SafeVelocityRosInterface)
-        self.publisher_ = self.create_publisher(TwistStamped, '/cmd_vel', 10)
+        # Topic is /nav_vel (routed through twist_mux)
+        self.publisher_ = self.create_publisher(TwistStamped, '/nav_vel', 10)
         
         # Safety FSM expects a control period of ~20ms (50Hz)
         self.timer_period = 0.02  # seconds (50 Hz)
@@ -26,7 +26,7 @@ class VelocityPublisher(Node):
         msg.header.stamp = self.get_clock().now().to_msg()
         msg.header.frame_id = 'base_link'
         
-        msg.twist.linear.x = 0.1
+        msg.twist.linear.x = 0.5
         msg.twist.linear.y = 0.0
         msg.twist.angular.z = 0.0
         
