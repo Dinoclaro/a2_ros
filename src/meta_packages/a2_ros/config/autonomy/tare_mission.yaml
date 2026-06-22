@@ -1,0 +1,122 @@
+tare_planner_node:
+  ros__parameters:
+    sub_start_exploration_topic_ : /start_exploration
+    sub_terrain_map_topic_ : /terrain_map
+    sub_terrain_map_ext_topic_ : /terrain_map_ext
+    sub_state_estimation_topic_ : /state_estimation
+    sub_registered_scan_topic_ : /registered_scan
+    sub_coverage_boundary_topic_ : /sensor_coverage_planner/coverage_boundary
+    sub_viewpoint_boundary_topic_ : /navigation_boundary
+    sub_nogo_boundary_topic_ : /sensor_coverage_planner/nogo_boundary
+    sub_joystick_topic_ : /joy
+    sub_reset_waypoint_topic_ : /reset_waypoint
+    pub_exploration_finish_topic_ : exploration_finish
+    pub_runtime_breakdown_topic_ : runtime_breakdown
+    pub_runtime_topic_ : /runtime
+    pub_waypoint_topic_ : /tare/way_point
+    pub_momentum_activation_count_topic_ : momentum_activation_count
+
+    kAutoStart : false              # mission orchestrator triggers via /start_exploration
+    kRushHome : false               # homing handled by far_planner on detection
+    kUseTerrainHeight : true
+    kCheckTerrainCollision : true
+    kExtendWayPoint : true
+    kUseLineOfSightLookAheadPoint : true
+    kNoExplorationReturnHome : false
+    kExtendWayPointDistanceBig : 4.0
+    kExtendWayPointDistanceSmall : 2.5
+    kKeyposeCloudDwzFilterLeafSize : 0.2
+    kRushHomeDist : 10.0
+    kAtHomeDistThreshold : 0.5
+    kTerrainCollisionThreshold : 0.3
+    kLookAheadDistance : 5.0
+    kUseMomentum : false
+    kDirectionChangeCounterThr : 6
+    kDirectionNoChangeCounterThr : 5
+    kResetWaypointJoystickAxesID : 2
+
+    kUseFrontier : true
+    kFrontierClusterTolerance : 1.0
+    kFrontierClusterMinSize : 20
+    kUseCoverageBoundaryOnFrontier : false
+    kUseCoverageBoundaryOnObjectSurface : false
+
+    rolling_occupancy_grid/resolution_x : 0.2
+    rolling_occupancy_grid/resolution_y : 0.2
+    rolling_occupancy_grid/resolution_z : 0.2
+
+    kSurfaceCloudDwzLeafSize : 0.3
+    kCollisionCloudDwzLeafSize : 0.2
+    kKeyposeCloudStackNum : 5
+    kPointCloudRowNum : 50
+    kPointCloudColNum : 50
+    kPointCloudLevelNum : 20
+    kMaxCellPointNum : 100000
+    kPointCloudCellSize : 12.0
+    kPointCloudCellHeight : 1.2
+    kPointCloudManagerNeighborCellNum : 5
+    kCoverCloudZSqueezeRatio : 2.0
+
+    keypose_graph/kAddNodeMinDist : 0.5
+    keypose_graph/kAddNonKeyposeNodeMinDist : 0.3
+    keypose_graph/kAddEdgeConnectDistThr : 2.0
+    keypose_graph/kAddEdgeToLastKeyposeDistThr : 2.0
+    keypose_graph/kAddEdgeVerticalThreshold : 0.5
+    keypose_graph/kAddEdgeCollisionCheckResolution : 0.3
+    keypose_graph/kAddEdgeCollisionCheckRadius : 0.3
+    keypose_graph/kAddEdgeCollisionCheckPointNumThr : 1
+
+    viewpoint_manager/number_x : 10
+    viewpoint_manager/number_y : 10
+    viewpoint_manager/number_z : 1
+    viewpoint_manager/resolution_x : 0.8
+    viewpoint_manager/resolution_y : 0.8
+    viewpoint_manager/resolution_z : 0.0
+    kConnectivityHeightDiffThr : 0.25
+    kGreedyViewPointSampleRange : 3
+    kLocalPathOptimizationItrMax : 10
+    kViewPointCollisionMargin : 0.3
+    kViewPointCollisionMarginZPlus : 0.4
+    kViewPointCollisionMarginZMinus : 0.3
+    kCollisionGridZScale : 1.0
+    kCollisionGridResolutionX : 0.2
+    kCollisionGridResolutionY : 0.2
+    kCollisionGridResolutionZ : 0.0
+    kCollisionPointThr : 1
+    kLineOfSightStopAtNearestObstacle : true
+    kViewPointHeightFromTerrain : 0.5
+    kViewPointHeightFromTerrainChangeThreshold : 0.4
+    kCheckDynamicObstacleCollision : false
+    kCollisionFrameCountMax : 3
+
+    kSensorRange : 10.0
+    kNeighborRange : 2.5
+    kCoverageOcclusionThr : 0.3
+    kCoverageDilationRadius : 0.8
+
+    kGridWorldXNum : 121
+    kGridWorldYNum : 121
+    kGridWorldZNum : 1
+    kGridWorldCellHeight : 1.5
+    kGridWorldNearbyGridNum : 5
+    kMinAddPointNumSmall : 20
+    kMinAddPointNumBig : 40
+    kMinAddFrontierPointNum : 10
+    kCellExploringToCoveredThr : 1
+    kCellCoveredToExploringThr : 10
+    kCellExploringToAlmostCoveredThr : 10
+    kCellAlmostCoveredToExploringThr : 20
+    kCellUnknownToExploringThr : 1
+
+    kExploringSubspaceMarkerColorGradientAlpha : true
+    kExploringSubspaceMarkerColorMaxAlpha : 0.8
+    kExploringSubspaceMarkerColorR : 0.0
+    kExploringSubspaceMarkerColorG : 1.0
+    kExploringSubspaceMarkerColorB : 0.0
+    kExploringSubspaceMarkerColorA : 1.0
+    kLocalPlanningHorizonMarkerColorR : 0.0
+    kLocalPlanningHorizonMarkerColorG : 1.0
+    kLocalPlanningHorizonMarkerColorB : 0.0
+    kLocalPlanningHorizonMarkerColorA : 1.0
+    kLocalPlanningHorizonMarkerWidth : 0.3
+    kLocalPlanningHorizonHeight : 1.5

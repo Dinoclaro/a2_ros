@@ -21,6 +21,8 @@ setup(
     entry_points={
         'console_scripts': [
             'velocity_publisher = a2_orchestrator.velocity_publisher:main',
+            'waypoint_mux = a2_orchestrator.waypoint_mux:main',
+            'mission_orchestrator = a2_orchestrator.mission_orchestrator:main',
         ],
     },
 )

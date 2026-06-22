@@ -19,6 +19,7 @@
   <exec_depend>a2_ros</exec_depend>
   <exec_depend>a2_state_estimation</exec_depend>
   <exec_depend>a2_object_detection</exec_depend>
+  <exec_depend>a2_orchestrator</exec_depend>
   <exec_depend>hesai_ros_driver</exec_depend>
 
   <export>

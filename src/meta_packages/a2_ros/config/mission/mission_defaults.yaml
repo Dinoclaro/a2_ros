@@ -1,0 +1,54 @@
+# Default parameters for mission_orchestrator (Phase 4+).
+# Loaded by mission.launch.py; launch args override these where noted.
+mission_orchestrator:
+  ros__parameters:
+    # Mode sequencing (seconds)
+    stand_wait_sec: 5.0
+    pre_walk_wait_sec: 5.0
+
+    # DLIO readiness
+    dlio_ready_timeout_sec: 30.0
+    dlio_min_registered_scan_count: 5
+
+    # Prerequisite topic checks
+    lidar_topic: "/front_lidar/points"
+    camera_image_topic: "/camera/image/compressed"
+    prereq_timeout_sec: 60.0
+
+    # Object detection trigger (class_id matches YOLO name string in detection_info)
+    target_class: "bottle"
+    min_confidence: 0.5
+    detection_frames_required: 3
+
+    # Homing
+    map_frame: "map"
+    odom_topic: "/state_estimation"
+    goal_topic: "/goal_point"
+    home_arrival_threshold_m: 0.5
+    nav_home_timeout_sec: 300.0
+
+    # Map export
+    save_dir: "/tmp/a2_mission"
+    map_leaf_size: 0.15
+    dlio_save_pcd_service: "/dlio_map_node/save_pcd"
+    registered_scan_topic: "/registered_scan"
+    detection_info_topic: "/detection_info"
+    detection_clouds_topic: "/detection_point_clouds"
+
+    # Status topic for operators / Foxglove
+    status_topic: "/mission/status"
+
+    # Waypoint mux control
+    waypoint_source_topic: "/mission/waypoint_source"
+    start_exploration_topic: "/start_exploration"
+
+waypoint_mux:
+  ros__parameters:
+    tare_waypoint_topic: "/tare/way_point"
+    far_waypoint_topic: "/far/way_point"
+    output_waypoint_topic: "/way_point"
+    waypoint_source_topic: "/mission/waypoint_source"
+    odom_topic: "/state_estimation"
+    map_frame: "map"
+    hold_publish_rate_hz: 5.0
+    default_source: "hold"
