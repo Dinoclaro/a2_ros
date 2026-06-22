@@ -6,8 +6,11 @@ topics:
   - /imu/data
   - /registered_scan
   - /front_lidar/points
-  - /back_lidar/points
   - /tf
   - /tf_static
   - /camera/camera_info
   - /camera/image/compressed
+  - /front_lidar/imu
+  - /dlio/odom_node/map_pose
+  - /registered_scan
+  - /state_estimation
