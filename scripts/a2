@@ -40,6 +40,7 @@ _stack_pattern() {
         sim)         echo "sim.launch.py" ;;
         nav)         echo "navigation.launch.py" ;;
         explore)     echo "exploration.launch.py" ;;
+        mission)     echo "mission.launch.py" ;;
         dlio)        echo "dlio.launch.py" ;;
         resple)      echo "resple.launch.py" ;;
         detect)      echo "object_detection" ;;
@@ -112,6 +113,7 @@ Robot:
   keyboard           Keyboard teleop -> /cmd_vel (robot must be in walk mode)
   nav   [--rviz]     Launch navigation stack
   explore [--rviz]   Launch autonomous exploration (TARE)
+  mission            Launch autonomous mission orchestrator (a2_orchestrator)
   dlio  [--rviz]     Launch DLIO LiDAR-inertial odometry
   resple [--rviz]    Launch RESPLE LiDAR-inertial odometry
   detect             Launch object detection (YOLO, CPU); _real launch on robot
@@ -131,8 +133,8 @@ Utilities:
   router             Start Zenoh router (foreground)
   verify             Verify MuJoCo installation
   ps                 List running managed stacks and their PIDs
-  down [stack]       Stop a running stack (sim|nav|explore|dlio|resple|detect|
-                     foxglove|plotjuggler), or all of them if no stack is given
+  down [stack]       Stop a running stack (sim|nav|explore|mission|dlio|resple|
+                     detect|foxglove|plotjuggler), or all of them if no stack is given
 
 Mode:      ${A2_MODE:-unknown}
 Workspace: $WORKSPACE_DIR
@@ -243,6 +245,16 @@ case "$CMD" in
     explore)
         _run explore ros2 launch a2_ros exploration.launch.py rviz:=$RVIZ
         ;;
+    mission)
+        MISSION_ARGS=()
+        if [ "$A2_MODE" = "sim" ]; then
+            MISSION_ARGS+=(
+                use_sim_time:=true
+                camera_image_topic:=/camera/image_raw
+            )
+        fi
+        _run mission ros2 launch a2_orchestrator mission.launch.py "${MISSION_ARGS[@]}" "${ARGS[@]:1}"
+        ;;
     dlio)
         DLIO_ARGS=(rviz:=$RVIZ)
         [ "$A2_MODE" = "sim" ] && DLIO_ARGS+=(use_sim_time:=true)
@@ -317,7 +329,7 @@ case "$CMD" in
     ps)
         # Show which managed stacks are currently running, with their PIDs.
         FOUND=false
-        for s in sim nav explore dlio resple detect foxglove plotjuggler; do
+        for s in sim nav explore mission dlio resple detect foxglove plotjuggler; do
             PIDS="$(_stack_pids "$(_stack_pattern "$s")" | tr '\n' ' ')"
             if [[ -n "${PIDS// }" ]]; then
                 info "$(printf '%-12s' "$s") ${PIDS}"
@@ -334,7 +346,7 @@ case "$CMD" in
             PAT="$(_stack_pattern "$TARGET")" || { error "Unknown stack: $TARGET"; exit 1; }
             _kill_stale "$PAT"
         else
-            for s in sim nav explore dlio resple detect foxglove plotjuggler; do
+            for s in sim nav explore mission dlio resple detect foxglove plotjuggler; do
                 _kill_stale "$(_stack_pattern "$s")"
             done
         fi
