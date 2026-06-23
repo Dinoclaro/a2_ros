@@ -2,25 +2,29 @@
 
 This package runs the **autonomous survey mission**: stand up the robot, explore with TARE, save a DLIO map, and navigate home with FAR.
 
-Most mission logic lives here so changes stay isolated from `a2_ros` launch files.
+The orchestrator assumes the **mega stack** (TARE + FAR + terrain + `waypoint_mux`) is already running. It controls locomotion modes and switches planners via topics — no subprocess stack swapping.
 
 ---
 
 ## Quick Start
 
 ```bash
-# Terminal 1 — sim + robot stack (must be running first)
+# Terminal 1 — sim
 export A2_MODE=sim
 a2 sim
 
-# Terminal 2 — mission (DLIO + orchestrator)
+# Terminal 2 — DLIO + mega stack (TARE + FAR + mux)
+a2 dlio
+ros2 launch a2_ros mega.launch.py use_sim_time:=true rviz:=false
+
+# Terminal 3 — mission orchestrator
 a2 mission save_dir:=/tmp/run1
 
 # Monitor progress
 ros2 topic echo /mission/status
 ```
 
-Real robot: start `nuc.launch.py` + `pc2_bridge.sh`, then `a2 mission save_dir:=/tmp/run1`.
+Real robot: start `nuc.launch.py` + pc2 bridge, DLIO, and mega stack, then run the orchestrator.
 
 ---
 
@@ -28,22 +32,22 @@ Real robot: start `nuc.launch.py` + `pc2_bridge.sh`, then `a2 mission save_dir:=
 
 ```
 a2_orchestrator/
-├── README.md                          ← this file
+├── README.md
 ├── config/
-│   └── mission_defaults.yaml          ← default orchestrator parameters
+│   └── mission_defaults.yaml
 ├── launch/
-│   └── mission.launch.py              ← entry point: DLIO + orchestrator
+│   └── mission.launch.py              ← DLIO + orchestrator (optional entry)
 └── a2_orchestrator/
-    ├── mission_state.py               ← state enum (easy to extend)
-    ├── stack_manager.py               ← subprocess spawn/kill for explore/nav
+    ├── mission_state.py               ← state enum
     ├── mission_orchestrator.py        ← main state machine node
+    ├── waypoint_mux.py                ← TARE/FAR waypoint multiplexer
+    ├── stack_manager.py               ← legacy (unused by simplified orchestrator)
     └── detection_logger.py            ← optional CSV detection logger
 ```
 
-**External stacks** (unchanged, in `a2_ros`):
+**Prerequisite stack** (in `a2_ros`):
 
-- `exploration.launch.py` — TARE + terrain + local planner (spawned as subprocess)
-- `navigation.launch.py` — FAR + terrain + local planner (spawned as subprocess)
+- `mega.launch.py` — terrain, local planner, TARE, FAR, `waypoint_mux`
 
 ---
 
@@ -52,124 +56,112 @@ a2_orchestrator/
 ### High-Level Flow
 
 ```
-Prerequisites (a2 sim)  →  mission.launch.py  →  mission_orchestrator
-                              │
-                              ├─ optional DLIO
-                              │
-                              └─ state machine:
-                                   stand → unlock → walk → record home
-                                   → spawn exploration.launch.py
-                                   → explore until finish or timeout
-                                   → save map (SavePCD)
-                                   → spawn navigation.launch.py
-                                   → publish home goal → arrive → done
+Prerequisites (sim + mega + DLIO)  →  mission_orchestrator
+                                           │
+                                           └─ state machine:
+                                                stand → unlock → walk
+                                                → select TARE + start exploration
+                                                → explore until finish or timeout
+                                                → save map (SavePCD)
+                                                → select FAR + goal (0,0,0)
+                                                → arrive → done
 ```
 
 ### Motion During Exploration
 
 ```
-tare_planner  →  /way_point  →  localPlanner  →  pathFollower  →  /nav_vel  →  twist_mux  →  /cmd_vel
+tare_planner  →  /tare/way_point  →  waypoint_mux  →  /way_point  →  localPlanner  →  ...
 ```
 
-`twist_mux` and the locomotion FSM come from `a2 sim`, not from this package.
+Orchestrator publishes `/planner/select` = `tare` and `/start_exploration` = `true`.
 
 ### Motion During Return Home
 
 ```
-mission_orchestrator  →  /goal_point  →  far_planner  →  /way_point  →  localPlanner  →  ...
+mission_orchestrator  →  /planner/select far
+                     →  /goal_point (0,0,0)
+far_planner  →  /far/way_point  →  waypoint_mux  →  /way_point  →  localPlanner  →  ...
 ```
+
+On tare→far switch, `waypoint_mux` publishes a stop goal at the current pose before FAR takes over.
 
 ---
 
 ## State Machine
 
-States are defined in `mission_state.py`. The tick loop in `mission_orchestrator.py` dispatches to one handler per state:
-
 | State | What happens |
 |-------|----------------|
-| `CHECK_PREREQS` | Wait for `/a2/set_mode`, lidar, camera |
+| `CHECK_PREREQS` | Wait for `/a2/set_mode` and odometry |
 | `STAND` → `WAIT_STAND` → `UNLOCK` → `WALK` | Locomotion mode sequence (2→3→4) |
-| `RECORD_HOME` | Write `{save_dir}/origin.txt` from odometry |
-| `SPAWN_EXPLORE` | Subprocess: `ros2 launch a2_ros exploration.launch.py` |
-| `EXPLORING` | Run until `/exploration_finish`, timeout, or stack crash |
-| `KILL_EXPLORE` | Stop explore subprocess |
+| `RECORD_HOME` | Write `{save_dir}/origin.txt` (actual start pose) |
+| `START_EXPLORE` | `/planner/select` = `tare`, `/start_exploration` = `true` |
+| `EXPLORING` | Wait for `/exploration_finish` or timeout |
 | `SAVE_MAP` | Call DLIO `SavePCD` → `clean_map.pcd` |
-| `SPAWN_NAV` | Subprocess: `ros2 launch a2_ros navigation.launch.py` |
-| `NAV_HOME` | Publish `/goal_point`, wait until near origin |
-| `KILL_NAV` / `DONE` | Cleanup |
+| `NAV_HOME` | `/planner/select` = `far`, `/goal_point` at home goal (default 0,0,0) |
+| `DONE` | Unlock locomotion |
 
-Status is published on `/mission/status` as `STATE:detail` (e.g. `EXPLORING:exploring (42s, limit=600s)`).
+Status is published on `/mission/status` as `STATE:detail`.
 
 ---
 
 ## Key Modules
 
-### `stack_manager.py`
-
-Handles **one subprocess at a time** (explore OR nav, never both):
-
-- `spawn_stack(package, launch_name, args, save_dir)` — runs `ros2 launch`, logs to `{save_dir}/explore_launch.log` or `nav_launch.log`
-- `kill_stack()` — SIGINT process group, then SIGKILL after 10 s
-- `topic_publisher_count()`, `node_running()` — used to verify TARE started
-
-**To change spawn behavior** (e.g. extra launch args), edit `_launch_args()` in `mission_orchestrator.py`.
-
 ### `mission_orchestrator.py`
 
-Main ROS node. Organized as:
+Main ROS node. Publishes:
 
-- `_declare_parameters` / `_load_parameters` — all tunables
-- `_tick_*` methods — one per state (add new states here)
-- Mode service client — `/a2/set_mode`
-- **Do not** `declare_parameter('use_sim_time')` — launch pre-declares it; re-declaring crashes the node
+| Topic | Message | Purpose |
+|-------|---------|---------|
+| `/planner/select` | `std_msgs/String` | `tare` or `far` |
+| `/start_exploration` | `std_msgs/Bool` | Start TARE when `kAutoStart: false` |
+| `/goal_point` | `PointStamped` | FAR navigation goal |
+| `/mission/status` | `std_msgs/String` | State machine status |
 
-### `detection_logger.py`
+**Do not** `declare_parameter('use_sim_time')` — launch pre-declares it.
 
-Optional node that writes `{save_dir}/detections.csv`. Disabled in `mission.launch.py` until the object_detection ONNX model path is fixed. To enable, uncomment the detection blocks in `launch/mission.launch.py`.
+### `waypoint_mux.py`
+
+Runs inside `mega.launch.py`. Forwards TARE or FAR waypoints to `/way_point`. Listens on `/planner/select`.
+
+Manual switch:
+
+```bash
+ros2 topic pub --once /planner/select std_msgs/msg/String "{data: 'far'}"
+ros2 topic pub --once /planner/select std_msgs/msg/String "{data: 'tare'}"
+```
 
 ---
 
 ## Parameters
 
-Defaults live in `config/mission_defaults.yaml`. Override via launch:
+Defaults in `config/mission_defaults.yaml`:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `save_dir` | `/tmp/a2_mission` | Output directory |
+| `exploration_timeout_sec` | `600` | Max explore time (seconds) |
+| `skip_home` | `false` | Skip return navigation after map save |
+| `home_arrival_threshold_m` | `0.5` | Distance to home goal considered "arrived" |
+| `home_goal_x/y/z` | `0.0` | FAR return-home goal in `map` frame |
+| `planner_select_topic` | `/planner/select` | Mux control topic |
+| `nav_home_timeout_sec` | `600` | Max time for return navigation |
+| `stand_wait_sec` | `4.0` | Pause after stand before unlock |
+| `dlio_save_pcd_service` | `/save_pcd` | Map save service |
+
+Override via launch:
 
 ```bash
 a2 mission save_dir:=/tmp/run1 exploration_timeout_sec:=300 skip_home:=true
 ```
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `save_dir` | `./runs/a2_mission` | Output directory |
-| `exploration_timeout_sec` | `60` | Max explore time (seconds) |
-| `skip_home` | `false` | Skip return navigation after map save |
-| `home_arrival_threshold_m` | `0.5` | Distance to origin considered "home" |
-| `explore_stack_warmup_sec` | `8` | Wait after spawn before TARE check |
-| `explore_stack_ready_timeout_sec` | `45` | Extra wait for TARE `/way_point` |
-| `stand_wait_sec` | `6` | Pause after stand before unlock |
-| `stack_rviz` | `false` | Pass `rviz:=true` to spawned explore/nav stacks |
-| `camera_image_topic` | `/camera/image/compressed` | Prereq camera (sim: `/camera/image_raw`) |
-| `dlio_save_pcd_service` | `/save_pcd` | Map save service |
-
-Launch-level args in `mission.launch.py`:
-
-| Launch arg | Default | Description |
-|------------|---------|-------------|
-| `use_sim_time` | `false` | Required `true` in sim |
-| `include_dlio` | `true` | Set `false` if DLIO already running |
-
 ---
 
 ## Outputs
 
-All files under `save_dir`:
-
 | File | Description |
 |------|-------------|
-| `origin.txt` | Home position `x y z` |
+| `origin.txt` | Actual start pose `x y z` |
 | `clean_map.pcd` | DLIO voxel map |
-| `explore_launch.log` | Explore stack stdout/stderr |
-| `nav_launch.log` | Nav stack stdout/stderr |
-| `detections.csv` | Optional detection log |
 
 ---
 
@@ -177,26 +169,19 @@ All files under `save_dir`:
 
 ### Robot doesn't move during exploration
 
-1. Check TARE is running: `ros2 node list | grep tare`
-2. Check waypoint publisher: `ros2 topic info /way_point` (Publisher count should be ≥ 1)
-3. Read spawn log: `cat {save_dir}/explore_launch.log`
-4. Ensure sim uses `use_sim_time:=true` (`a2 mission` sets this when `A2_MODE=sim`)
-
-### Mission fails at prerequisites
-
-- Start `a2 sim` (or nuc + pc2 bridge) **before** `a2 mission`
-- Sim needs `camera_image_topic:=/camera/image_raw` (set automatically by `a2 mission`)
+1. Ensure mega stack is running and mux is on `tare`: check `/mission/status`
+2. TARE needs `kAutoStart: false` if you rely on `/start_exploration` only
+3. Check `/tare/way_point` and `/way_point` have traffic
 
 ### Exploration never finishes
 
-- TARE must publish on `/exploration_finish` (absolute topic in `a2_ros/config/autonomy/tare_a2.yaml`)
+- TARE publishes `/exploration_finish` when done
 - Or mission stops at `exploration_timeout_sec`
 
-### Cleanup orphaned processes
+### Nav home doesn't start
 
-```bash
-a2 down mission explore nav
-```
+- FAR visibility graph must be initialized before goals are accepted
+- Check `/goal_point` and `/far/way_point` after `SAVE_MAP` state
 
 ---
 
@@ -207,32 +192,15 @@ a2 down mission explore nav
 1. Add enum value in `mission_state.py`
 2. Add `_tick_your_state()` in `mission_orchestrator.py`
 3. Register it in the `_tick()` handlers dict
-4. Transition into/out of it from adjacent states
+4. Transition from adjacent states
 
-### Change explore/nav stacks
+### Change home goal
 
-Edit parameters in `mission_defaults.yaml`:
+Set `home_goal_x`, `home_goal_y`, `home_goal_z` in `mission_defaults.yaml` or via launch args.
 
-```yaml
-explore_launch: "launch/exploration.launch.py"   # relative to a2_ros share
-nav_launch: "launch/navigation.launch.py"
-```
+### Change exploration stop condition
 
-Or change `LAUNCH_PACKAGE = 'a2_ros'` in `mission_orchestrator.py` if stacks move packages.
-
-### Enable object detection logging
-
-1. Fix ONNX model path in `object_detection` package
-2. Uncomment detection launch + `detection_logger` in `launch/mission.launch.py`
-3. Rebuild and run with `sim_detection:=true` in sim
-
-### Change stop condition for exploration
-
-Edit `_tick_exploring()` in `mission_orchestrator.py` — currently stops on:
-
-- `/exploration_finish` Bool true
-- `exploration_timeout_sec` elapsed
-- explore subprocess exit
+Edit `_tick_exploring()` — currently stops on `/exploration_finish` or timeout.
 
 ---
 
@@ -242,19 +210,3 @@ Edit `_tick_exploring()` in `mission_orchestrator.py` — currently stops on:
 colcon build --packages-select a2_orchestrator --symlink-install
 source install/setup.bash
 ```
-
----
-
-## Minimal Changes Outside This Package
-
-To keep impact low, only these non-orchestrator files were touched:
-
-| File | Change |
-|------|--------|
-| `a2_ros/config/autonomy/tare_a2.yaml` | `/exploration_finish` absolute topic |
-| `a2_ros/launch/exploration.launch.py` | `use_sim_time` launch arg |
-| `a2_ros/launch/navigation.launch.py` | `use_sim_time` launch arg |
-| `scripts/a2` | `a2 mission` command |
-| `scripts/a2_shell.sh` | tab completion |
-
-Explore and navigation launch files were **not** refactored to `autonomy_base` — they remain as-is in `a2_ros`.
