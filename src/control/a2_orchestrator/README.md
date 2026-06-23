@@ -139,8 +139,8 @@ a2 mission save_dir:=/tmp/run1 exploration_timeout_sec:=300 skip_home:=true
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `save_dir` | `/tmp/a2_mission` | Output directory |
-| `exploration_timeout_sec` | `600` | Max explore time (seconds) |
+| `save_dir` | `./runs/a2_mission` | Output directory |
+| `exploration_timeout_sec` | `60` | Max explore time (seconds) |
 | `skip_home` | `false` | Skip return navigation after map save |
 | `home_arrival_threshold_m` | `0.5` | Distance to origin considered "home" |
 | `explore_stack_warmup_sec` | `8` | Wait after spawn before TARE check |
@@ -148,7 +148,7 @@ a2 mission save_dir:=/tmp/run1 exploration_timeout_sec:=300 skip_home:=true
 | `stand_wait_sec` | `6` | Pause after stand before unlock |
 | `stack_rviz` | `false` | Pass `rviz:=true` to spawned explore/nav stacks |
 | `camera_image_topic` | `/camera/image/compressed` | Prereq camera (sim: `/camera/image_raw`) |
-| `dlio_save_pcd_service` | `/dlio_map_node/save_pcd` | Map save service |
+| `dlio_save_pcd_service` | `/save_pcd` | Map save service |
 
 Launch-level args in `mission.launch.py`:
 
