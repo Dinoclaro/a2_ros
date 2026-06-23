@@ -1,34 +1,27 @@
 #!/usr/bin/env python3
-"""Autonomous mission state machine: stand, explore, detect, return home, save map."""
+"""Simple mission orchestrator: explore, save map, return home."""
 
 from __future__ import annotations
 
-import json
 import math
 import os
-from dataclasses import dataclass, field
+import signal
+import subprocess
+import time
 from enum import Enum, auto
 from typing import List, Optional
 
 import rclpy
-from rclpy.node import Node
-from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+from ament_index_python.packages import get_package_share_directory
 from a2_interfaces.msg import OperatingMode
 from a2_interfaces.srv import SetOperatingMode
 from direct_lidar_inertial_odometry.srv import SavePCD
 from geometry_msgs.msg import Point, PointStamped
 from nav_msgs.msg import Odometry
-from object_detection_msgs.msg import (
-    ObjectDetectionInfo,
-    ObjectDetectionInfoArray,
-    PointCloudArray,
-)
+from rclpy.node import Node
+from rclpy.qos import QoSHistoryPolicy, QoSProfile, QoSReliabilityPolicy
 from sensor_msgs.msg import CompressedImage, Image, PointCloud2
-from sensor_msgs_py import point_cloud2
 from std_msgs.msg import Bool, String
-from tf2_geometry_msgs import do_transform_point
-from tf2_ros import Buffer, TransformListener, TransformException
-from tf2_sensor_msgs.tf2_sensor_msgs import do_transform_cloud
 
 
 class MissionState(Enum):
@@ -36,27 +29,17 @@ class MissionState(Enum):
     STAND = auto()
     WAIT_STAND = auto()
     UNLOCK = auto()
-    RECORD_HOME = auto()
-    WAIT_DLIO = auto()
-    WAIT_PRE_WALK = auto()
     WALK = auto()
-    START_EXPLORE = auto()
+    RECORD_HOME = auto()
+    SPAWN_EXPLORE = auto()
     EXPLORING = auto()
-    STOP_EXPLORE = auto()
-    NAV_HOME = auto()
+    KILL_EXPLORE = auto()
     SAVE_MAP = auto()
+    SPAWN_NAV = auto()
+    NAV_HOME = auto()
+    KILL_NAV = auto()
     DONE = auto()
     FAILED = auto()
-
-
-@dataclass
-class SavedDetection:
-    class_id: str = ''
-    confidence: float = 0.0
-    position_map: Point = field(default_factory=Point)
-    source_frame: str = ''
-    stamp_sec: float = 0.0
-    point_clouds: List[PointCloud2] = field(default_factory=list)
 
 
 class MissionOrchestrator(Node):
@@ -71,23 +54,24 @@ class MissionOrchestrator(Node):
 
         self._state = MissionState.CHECK_PREREQS
         self._state_entered_at = self.get_clock().now()
+        self._exploring_started_at = None
+        self._explore_stop_reason = ''
+
         self._mode_request_pending = False
         self._last_mode_accepted: Optional[bool] = None
-        self._map_save_done = False
 
         self._lidar_seen = False
         self._camera_seen = False
-        self._registered_scan_count = 0
+        self._exploration_finished = False
         self._last_odom: Optional[Odometry] = None
-
-        self._detection_streak = 0
-        self._latest_detections = ObjectDetectionInfoArray()
-        self._latest_detection_clouds = PointCloudArray()
-        self._saved_detection: Optional[SavedDetection] = None
-
         self._home = Point()
         self._home_recorded = False
-        self._nav_home_started_at = None
+        self._home_stable_count = 0
+        self._nav_goal_sent = False
+        self._map_save_done = False
+        self._done_logged = False
+
+        self._stack_proc: Optional[subprocess.Popen] = None
 
         qos_sensor = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -96,34 +80,16 @@ class MissionOrchestrator(Node):
         )
 
         self._status_pub = self.create_publisher(String, self._status_topic, 10)
-        self._start_explore_pub = self.create_publisher(
-            Bool, self._start_exploration_topic, 10
-        )
         self._goal_pub = self.create_publisher(PointStamped, self._goal_topic, 10)
-        self._waypoint_source_pub = self.create_publisher(
-            String, self._waypoint_source_topic, 10
-        )
 
         self.create_subscription(
             Odometry, self._odom_topic, self._odom_callback, qos_sensor
         )
         self.create_subscription(
-            PointCloud2, self._registered_scan_topic, self._scan_callback, qos_sensor
-        )
-        self.create_subscription(
             PointCloud2, self._lidar_topic, self._lidar_callback, qos_sensor
         )
         self.create_subscription(
-            ObjectDetectionInfoArray,
-            self._detection_info_topic,
-            self._detection_info_callback,
-            10,
-        )
-        self.create_subscription(
-            PointCloudArray,
-            self._detection_clouds_topic,
-            self._detection_clouds_callback,
-            10,
+            Bool, self._exploration_finish_topic, self._exploration_finish_callback, 10
         )
 
         if '/compressed' in self._camera_topic:
@@ -139,74 +105,64 @@ class MissionOrchestrator(Node):
             )
 
         self._mode_client = self.create_client(SetOperatingMode, '/a2/set_mode')
-
-        self._tf_buffer = Buffer()
-        self._tf_listener = TransformListener(self._tf_buffer, self)
-
         self.create_timer(0.2, self._tick)
         self._set_status('initialized')
 
     def _declare_parameters(self):
-        self.declare_parameter('stand_wait_sec', 5.0)
-        self.declare_parameter('pre_walk_wait_sec', 5.0)
-        self.declare_parameter('dlio_ready_timeout_sec', 30.0)
-        self.declare_parameter('dlio_min_registered_scan_count', 5)
+        self.declare_parameter('save_dir', '/tmp/a2_mission')
+        self.declare_parameter('stand_wait_sec', 4.0)
+        self.declare_parameter('exploration_finish_topic', '/exploration_finish')
+        self.declare_parameter('exploration_timeout_sec', 600.0)
+        self.declare_parameter('home_arrival_threshold_m', 0.5)
+        self.declare_parameter('nav_home_timeout_sec', 600.0)
+        self.declare_parameter('skip_home', False)
+        self.declare_parameter('map_leaf_size', 0.15)
+        self.declare_parameter('explore_launch', 'launch/exploration.launch.py')
+        self.declare_parameter('nav_launch', 'launch/navigation.launch.py')
+        # use_sim_time is pre-declared by rclpy / launch; do not declare again.
+        self.declare_parameter('stack_rviz', False)
         self.declare_parameter('lidar_topic', '/front_lidar/points')
         self.declare_parameter('camera_image_topic', '/camera/image/compressed')
-        self.declare_parameter('registered_scan_topic', '/registered_scan')
-        self.declare_parameter('detection_info_topic', '/detection_info')
-        self.declare_parameter('detection_clouds_topic', '/detection_point_clouds')
         self.declare_parameter('prereq_timeout_sec', 60.0)
-        self.declare_parameter('target_class', 'bottle')
-        self.declare_parameter('min_confidence', 0.5)
-        self.declare_parameter('detection_frames_required', 3)
-        self.declare_parameter('map_frame', 'map')
         self.declare_parameter('odom_topic', '/state_estimation')
         self.declare_parameter('goal_topic', '/goal_point')
-        self.declare_parameter('home_arrival_threshold_m', 0.5)
-        self.declare_parameter('nav_home_timeout_sec', 300.0)
-        self.declare_parameter('save_dir', '/tmp/a2_mission')
-        self.declare_parameter('map_leaf_size', 0.15)
-        self.declare_parameter('dlio_save_pcd_service', '/dlio_map_node/save_pcd')
+        self.declare_parameter('map_frame', 'map')
         self.declare_parameter('status_topic', '/mission/status')
-        self.declare_parameter('waypoint_source_topic', '/mission/waypoint_source')
-        self.declare_parameter('start_exploration_topic', '/start_exploration')
+        self.declare_parameter('dlio_save_pcd_service', '/save_pcd')
+        self.declare_parameter('registered_scan_topic', '/registered_scan')
 
     def _load_parameters(self):
+        self._save_dir = self.get_parameter('save_dir').value
         self._stand_wait_sec = self.get_parameter('stand_wait_sec').value
-        self._pre_walk_wait_sec = self.get_parameter('pre_walk_wait_sec').value
-        self._dlio_ready_timeout_sec = self.get_parameter('dlio_ready_timeout_sec').value
-        self._dlio_min_scan_count = self.get_parameter(
-            'dlio_min_registered_scan_count'
+        self._exploration_finish_topic = self.get_parameter(
+            'exploration_finish_topic'
         ).value
-        self._lidar_topic = self.get_parameter('lidar_topic').value
-        self._camera_topic = self.get_parameter('camera_image_topic').value
-        self._registered_scan_topic = self.get_parameter('registered_scan_topic').value
-        self._detection_info_topic = self.get_parameter('detection_info_topic').value
-        self._detection_clouds_topic = self.get_parameter(
-            'detection_clouds_topic'
+        self._exploration_timeout_sec = self.get_parameter(
+            'exploration_timeout_sec'
         ).value
-        self._prereq_timeout_sec = self.get_parameter('prereq_timeout_sec').value
-        self._target_class = self.get_parameter('target_class').value
-        self._min_confidence = self.get_parameter('min_confidence').value
-        self._detection_frames_required = self.get_parameter(
-            'detection_frames_required'
-        ).value
-        self._map_frame = self.get_parameter('map_frame').value
-        self._odom_topic = self.get_parameter('odom_topic').value
-        self._goal_topic = self.get_parameter('goal_topic').value
         self._home_threshold = self.get_parameter('home_arrival_threshold_m').value
         self._nav_home_timeout_sec = self.get_parameter('nav_home_timeout_sec').value
-        self._save_dir = self.get_parameter('save_dir').value
+        self._skip_home = self.get_parameter('skip_home').value
         self._map_leaf_size = self.get_parameter('map_leaf_size').value
-        self._dlio_save_pcd_service = self.get_parameter(
-            'dlio_save_pcd_service'
-        ).value
+        self._explore_launch = self.get_parameter('explore_launch').value
+        self._nav_launch = self.get_parameter('nav_launch').value
+        self._use_sim_time = (
+            self.get_parameter('use_sim_time').value
+            if self.has_parameter('use_sim_time')
+            else False
+        )
+        self._stack_rviz = self.get_parameter('stack_rviz').value
+        self._lidar_topic = self.get_parameter('lidar_topic').value
+        self._camera_topic = self.get_parameter('camera_image_topic').value
+        self._prereq_timeout_sec = self.get_parameter('prereq_timeout_sec').value
+        self._odom_topic = self.get_parameter('odom_topic').value
+        self._goal_topic = self.get_parameter('goal_topic').value
+        self._map_frame = self.get_parameter('map_frame').value
         self._status_topic = self.get_parameter('status_topic').value
-        self._waypoint_source_topic = self.get_parameter('waypoint_source_topic').value
-        self._start_exploration_topic = self.get_parameter(
-            'start_exploration_topic'
-        ).value
+        self._dlio_save_pcd_service = self.get_parameter('dlio_save_pcd_service').value
+        self._registered_scan_topic = self.get_parameter('registered_scan_topic').value
+
+        os.makedirs(self._save_dir, exist_ok=True)
 
     def _set_status(self, detail: str):
         msg = String()
@@ -222,11 +178,15 @@ class MissionOrchestrator(Node):
     def _elapsed(self) -> float:
         return (self.get_clock().now() - self._state_entered_at).nanoseconds * 1e-9
 
+    def _exploring_elapsed(self) -> float:
+        if self._exploring_started_at is None:
+            return 0.0
+        return (
+            self.get_clock().now() - self._exploring_started_at
+        ).nanoseconds * 1e-9
+
     def _odom_callback(self, msg: Odometry):
         self._last_odom = msg
-
-    def _scan_callback(self, _msg: PointCloud2):
-        self._registered_scan_count += 1
 
     def _lidar_callback(self, _msg: PointCloud2):
         self._lidar_seen = True
@@ -234,85 +194,61 @@ class MissionOrchestrator(Node):
     def _camera_callback(self, _msg):
         self._camera_seen = True
 
-    def _detection_info_callback(self, msg: ObjectDetectionInfoArray):
-        self._latest_detections = msg
-        if self._state != MissionState.EXPLORING:
+    def _exploration_finish_callback(self, msg: Bool):
+        if msg.data:
+            self._exploration_finished = True
+
+    def _launch_args(self) -> List[str]:
+        args = [f'rviz:={"true" if self._stack_rviz else "false"}']
+        if self._use_sim_time:
+            args.append('use_sim_time:=true')
+        return args
+
+    def _spawn_stack(self, launch_rel_path: str):
+        a2_ros_share = get_package_share_directory('a2_ros')
+        launch_file = os.path.join(a2_ros_share, launch_rel_path)
+        if not os.path.isfile(launch_file):
+            raise FileNotFoundError(f'Launch file not found: {launch_file}')
+
+        cmd = ['ros2', 'launch', launch_file, *self._launch_args()]
+        self.get_logger().info(f'Spawning stack: {" ".join(cmd)}')
+        self._stack_proc = subprocess.Popen(
+            cmd,
+            preexec_fn=os.setsid,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _kill_stack(self):
+        if self._stack_proc is None:
             return
-
-        matched = self._find_target_detection(msg)
-        if matched is None:
-            self._detection_streak = 0
+        if self._stack_proc.poll() is not None:
+            self._stack_proc = None
             return
-
-        self._detection_streak += 1
-        if self._detection_streak >= self._detection_frames_required:
-            self._capture_detection(matched)
-            self._transition(MissionState.STOP_EXPLORE, f'detected {matched.class_id}')
-
-    def _detection_clouds_callback(self, msg: PointCloudArray):
-        self._latest_detection_clouds = msg
-
-    def _find_target_detection(
-        self, msg: ObjectDetectionInfoArray
-    ) -> Optional[ObjectDetectionInfo]:
-        for info in msg.info:
-            if info.class_id != self._target_class:
-                continue
-            if info.confidence < self._min_confidence:
-                continue
-            return info
-        return None
-
-    def _capture_detection(self, info: ObjectDetectionInfo):
-        source_frame = self._latest_detections.header.frame_id
-        position_map = Point(x=info.position.x, y=info.position.y, z=info.position.z)
 
         try:
-            transform = self._tf_buffer.lookup_transform(
-                self._map_frame,
-                source_frame,
-                rclpy.time.Time(),
-            )
-            ps = PointStamped()
-            ps.header.frame_id = source_frame
-            ps.header.stamp = self._latest_detections.header.stamp
-            ps.point = info.position
-            position_map = do_transform_point(ps, transform).point
-        except TransformException as ex:
-            self.get_logger().warn(
-                f'TF {source_frame}->{self._map_frame} failed, using raw point: {ex}'
-            )
+            os.killpg(os.getpgid(self._stack_proc.pid), signal.SIGINT)
+        except ProcessLookupError:
+            self._stack_proc = None
+            return
 
-        clouds_in_map: List[PointCloud2] = []
-        for cloud in self._latest_detection_clouds.point_clouds:
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self._stack_proc.poll() is not None:
+                break
+            time.sleep(0.2)
+        else:
             try:
-                tf = self._tf_buffer.lookup_transform(
-                    self._map_frame,
-                    cloud.header.frame_id,
-                    rclpy.time.Time(),
-                )
-                clouds_in_map.append(do_transform_cloud(cloud, tf))
-            except TransformException as ex:
-                self.get_logger().warn(f'Skipping detection cloud transform: {ex}')
-
-        stamp = self._latest_detections.header.stamp
-        stamp_sec = float(stamp.sec) + float(stamp.nanosec) * 1e-9
-        self._saved_detection = SavedDetection(
-            class_id=info.class_id,
-            confidence=float(info.confidence),
-            position_map=position_map,
-            source_frame=source_frame,
-            stamp_sec=stamp_sec,
-            point_clouds=clouds_in_map,
-        )
+                os.killpg(os.getpgid(self._stack_proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self._stack_proc = None
 
     def _request_mode(self, mode: int) -> bool:
         if self._mode_request_pending or self._last_mode_accepted is not None:
             return False
         if not self._mode_client.wait_for_service(timeout_sec=0.0):
-            self.get_logger().warn(
-                'Waiting for /a2/set_mode (is a2 sim or pc2 bridge running?)...'
-            )
+            self.get_logger().warn('Waiting for /a2/set_mode...')
             return False
 
         req = SetOperatingMode.Request()
@@ -343,8 +279,7 @@ class MissionOrchestrator(Node):
         self._last_mode_accepted = response.success
         if response.success:
             self.get_logger().info(
-                f'Mode {requested_mode} accepted (now {response.current_mode}): '
-                f'{response.message}'
+                f'Mode {requested_mode} accepted: {response.message}'
             )
             return
 
@@ -353,14 +288,23 @@ class MissionOrchestrator(Node):
         )
         self._transition(MissionState.FAILED, response.message)
 
-    def _publish_waypoint_source(self, source: str):
-        msg = String()
-        msg.data = source
-        self._waypoint_source_pub.publish(msg)
+    def _record_home(self):
+        if self._last_odom is None:
+            return False
+        self._home = self._last_odom.pose.pose.position
+        self._home_recorded = True
+        origin_path = os.path.join(self._save_dir, 'origin.txt')
+        with open(origin_path, 'w', encoding='utf-8') as handle:
+            handle.write(
+                f'{self._home.x:.6f} {self._home.y:.6f} {self._home.z:.6f}\n'
+            )
+        self.get_logger().info(
+            f'Home recorded at ({self._home.x:.2f}, {self._home.y:.2f}, '
+            f'{self._home.z:.2f})'
+        )
+        return True
 
     def _publish_home_goal(self):
-        if not self._home_recorded:
-            return
         goal = PointStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         goal.header.frame_id = self._map_frame
@@ -374,6 +318,28 @@ class MissionOrchestrator(Node):
         dy = self._last_odom.pose.pose.position.y - self._home.y
         return math.hypot(dx, dy)
 
+    def _save_map(self) -> bool:
+        client = self.create_client(SavePCD, self._dlio_save_pcd_service)
+        if not client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error('SavePCD service unavailable')
+            return False
+
+        req = SavePCD.Request()
+        req.leaf_size = float(self._map_leaf_size)
+        req.save_path = self._save_dir
+        try:
+            response = client.call(req)
+        except Exception as ex:  # noqa: BLE001
+            self.get_logger().error(f'SavePCD failed: {ex}')
+            return False
+
+        if response.success:
+            self.get_logger().info(f'Map saved to {self._save_dir}/clean_map.pcd')
+            return True
+
+        self.get_logger().error('SavePCD returned success=False')
+        return False
+
     def _tick(self):
         if self._state in (MissionState.FAILED, MissionState.DONE):
             return
@@ -382,7 +348,7 @@ class MissionOrchestrator(Node):
             if self._elapsed() > self._prereq_timeout_sec:
                 self._transition(
                     MissionState.FAILED,
-                    'prerequisite timeout (start a2 sim or nuc+pc2 first)',
+                    'prerequisite timeout (start sim or nuc+pc2 first)',
                 )
                 return
             if not self._mode_client.wait_for_service(timeout_sec=0.0):
@@ -405,7 +371,7 @@ class MissionOrchestrator(Node):
                 return
             if not self._consume_mode_response():
                 return
-            self._transition(MissionState.WAIT_STAND, 'stand accepted, waiting for motion')
+            self._transition(MissionState.WAIT_STAND, 'stand accepted')
             return
 
         if self._state == MissionState.WAIT_STAND:
@@ -422,42 +388,7 @@ class MissionOrchestrator(Node):
                 return
             if not self._consume_mode_response():
                 return
-            self._transition(MissionState.RECORD_HOME, 'unlock accepted')
-            return
-
-        if self._state == MissionState.RECORD_HOME:
-            if self._mode_request_pending:
-                return
-            if self._last_odom is None:
-                self._set_status('waiting for odometry to record home')
-                return
-            self._home = self._last_odom.pose.pose.position
-            self._home_recorded = True
-            self.get_logger().info(
-                f'Home recorded at ({self._home.x:.2f}, {self._home.y:.2f}, '
-                f'{self._home.z:.2f})'
-            )
-            self._registered_scan_count = 0
-            self._transition(MissionState.WAIT_DLIO)
-            return
-
-        if self._state == MissionState.WAIT_DLIO:
-            if self._elapsed() > self._dlio_ready_timeout_sec:
-                self._transition(MissionState.FAILED, 'DLIO timeout')
-                return
-            if self._registered_scan_count < self._dlio_min_scan_count:
-                self._set_status(
-                    f'waiting for DLIO scans ({self._registered_scan_count}/'
-                    f'{self._dlio_min_scan_count})'
-                )
-                return
-            self._transition(MissionState.WAIT_PRE_WALK)
-            return
-
-        if self._state == MissionState.WAIT_PRE_WALK:
-            if self._elapsed() < self._pre_walk_wait_sec:
-                return
-            self._transition(MissionState.WALK)
+            self._transition(MissionState.WALK, 'unlock accepted')
             return
 
         if self._state == MissionState.WALK:
@@ -468,143 +399,137 @@ class MissionOrchestrator(Node):
                 return
             if not self._consume_mode_response():
                 return
-            self._transition(MissionState.START_EXPLORE, 'walk accepted')
+            self._transition(MissionState.RECORD_HOME, 'walk accepted')
             return
 
-        if self._state == MissionState.START_EXPLORE:
-            if self._mode_request_pending:
+        if self._state == MissionState.RECORD_HOME:
+            if not self._record_home():
+                self._set_status('waiting for odometry')
                 return
-            self._publish_waypoint_source('tare')
-            explore_msg = Bool()
-            explore_msg.data = True
-            self._start_explore_pub.publish(explore_msg)
-            self._transition(MissionState.EXPLORING, 'exploration started')
+            self._exploration_finished = False
+            self._transition(MissionState.SPAWN_EXPLORE)
+            return
+
+        if self._state == MissionState.SPAWN_EXPLORE:
+            if self._stack_proc is None:
+                try:
+                    self._spawn_stack(self._explore_launch)
+                except Exception as ex:  # noqa: BLE001
+                    self._transition(MissionState.FAILED, f'explore spawn failed: {ex}')
+                return
+            if self._elapsed() < 8.0:
+                self._set_status('waiting for explore stack')
+                return
+            self._exploring_started_at = self.get_clock().now()
+            self._transition(MissionState.EXPLORING, 'exploring')
             return
 
         if self._state == MissionState.EXPLORING:
+            if self._stack_proc is not None and self._stack_proc.poll() is not None:
+                self._explore_stop_reason = 'stack_exited'
+                self._transition(MissionState.KILL_EXPLORE, 'explore stack exited')
+                return
+            if self._exploration_finished:
+                self._explore_stop_reason = 'complete'
+                self._transition(MissionState.KILL_EXPLORE, 'exploration complete')
+                return
+            if (
+                self._exploration_timeout_sec > 0.0
+                and self._exploring_elapsed() >= self._exploration_timeout_sec
+            ):
+                self._explore_stop_reason = 'timeout'
+                self._transition(MissionState.KILL_EXPLORE, 'exploration timeout')
+                return
+            self._set_status(
+                f'exploring ({self._exploring_elapsed():.0f}s, '
+                f'limit={self._exploration_timeout_sec:.0f}s)'
+            )
             return
 
-        if self._state == MissionState.STOP_EXPLORE:
-            self._publish_waypoint_source('hold')
-            self._nav_home_started_at = None
-            self._transition(MissionState.NAV_HOME, 'holding before homing')
-            return
-
-        if self._state == MissionState.NAV_HOME:
-            if self._nav_home_started_at is None:
-                self._nav_home_started_at = self.get_clock().now()
-                self._publish_waypoint_source('far')
-                self._publish_home_goal()
-                self._set_status('navigating home')
-                return
-
-            if self._elapsed() > self._nav_home_timeout_sec:
-                self._transition(MissionState.FAILED, 'nav home timeout')
-                return
-
-            dist = self._distance_to_home()
-            if dist is not None and dist <= self._home_threshold:
-                self._transition(MissionState.SAVE_MAP, f'home reached ({dist:.2f} m)')
+        if self._state == MissionState.KILL_EXPLORE:
+            self._kill_stack()
+            self._transition(
+                MissionState.SAVE_MAP,
+                f'stopped: {self._explore_stop_reason}',
+            )
             return
 
         if self._state == MissionState.SAVE_MAP:
             if not self._map_save_done:
-                self._save_mission_artifacts()
+                self._save_map()
                 self._map_save_done = True
-                self._publish_waypoint_source('hold')
-                if not self._mode_request_pending:
-                    self._request_mode(self.MODE_UNLOCK)
-            if self._mode_request_pending:
+            if self._skip_home:
+                self._transition(MissionState.DONE, 'map saved, skip_home')
                 return
-            self._transition(MissionState.DONE, f'map saved to {self._save_dir}')
+            self._transition(MissionState.SPAWN_NAV, 'map saved, starting nav')
             return
 
-    def _save_mission_artifacts(self):
-        os.makedirs(self._save_dir, exist_ok=True)
+        if self._state == MissionState.SPAWN_NAV:
+            if self._stack_proc is None:
+                if not self._mode_request_pending and self._last_mode_accepted is None:
+                    self._request_mode(self.MODE_WALK)
+                    return
+                if self._mode_request_pending or not self._mode_response_ready():
+                    return
+                self._consume_mode_response()
+                try:
+                    self._spawn_stack(self._nav_launch)
+                except Exception as ex:  # noqa: BLE001
+                    self._transition(MissionState.FAILED, f'nav spawn failed: {ex}')
+                return
+            if self._elapsed() < 8.0:
+                self._set_status('waiting for nav stack')
+                return
+            self._nav_goal_sent = False
+            self._home_stable_count = 0
+            self._transition(MissionState.NAV_HOME, 'navigating home')
+            return
 
-        save_ok = False
-        for service_name in (
-            self._dlio_save_pcd_service,
-            '/dlio_map_node/save_pcd',
-            '/save_pcd',
-        ):
-            client = self.create_client(SavePCD, service_name)
-            if not client.wait_for_service(timeout_sec=2.0):
-                continue
-            req = SavePCD.Request()
-            req.leaf_size = float(self._map_leaf_size)
-            req.save_path = self._save_dir
-            try:
-                response = client.call(req)
-            except Exception as ex:  # noqa: BLE001
-                self.get_logger().warn(f'SavePCD via {service_name} failed: {ex}')
-                continue
-            if response.success:
-                save_ok = True
-                self.get_logger().info(f'DLIO map saved via {service_name}')
-                break
+        if self._state == MissionState.NAV_HOME:
+            if self._stack_proc is not None and self._stack_proc.poll() is not None:
+                self._transition(MissionState.FAILED, 'nav stack exited early')
+                return
+            if self._elapsed() > self._nav_home_timeout_sec:
+                self._transition(MissionState.FAILED, 'nav home timeout')
+                return
+            if not self._nav_goal_sent:
+                self._publish_home_goal()
+                self._nav_goal_sent = True
+                self._set_status('goal published')
+                return
 
-        if not save_ok:
-            self.get_logger().error('DLIO SavePCD failed on all known service names')
+            dist = self._distance_to_home()
+            if dist is not None and dist <= self._home_threshold:
+                self._home_stable_count += 1
+                if self._home_stable_count >= 5:
+                    self._transition(
+                        MissionState.KILL_NAV,
+                        f'home reached ({dist:.2f} m)',
+                    )
+                return
+            self._home_stable_count = 0
+            detail = f'navigating home ({dist:.2f} m)' if dist is not None else 'navigating'
+            self._set_status(detail)
+            return
 
-        objects_path = os.path.join(self._save_dir, 'detected_objects.pcd')
-        if self._saved_detection and self._saved_detection.point_clouds:
-            self._write_merged_pcd(objects_path, self._saved_detection.point_clouds)
-        else:
-            self.get_logger().warn('No detection point clouds to export')
+        if self._state == MissionState.KILL_NAV:
+            self._kill_stack()
+            self._transition(MissionState.DONE, 'nav complete')
+            return
 
-        summary = {
-            'status': 'completed' if save_ok else 'completed_with_map_save_error',
-            'save_dir': self._save_dir,
-            'home': {'x': self._home.x, 'y': self._home.y, 'z': self._home.z},
-            'detection': None,
-            'artifacts': {
-                'dlio_clean_map': os.path.join(self._save_dir, 'clean_map.pcd'),
-                'detected_objects': objects_path,
-            },
-        }
-        if self._saved_detection:
-            det = self._saved_detection
-            summary['detection'] = {
-                'class_id': det.class_id,
-                'confidence': det.confidence,
-                'position_map': {
-                    'x': det.position_map.x,
-                    'y': det.position_map.y,
-                    'z': det.position_map.z,
-                },
-                'source_frame': det.source_frame,
-                'stamp_sec': det.stamp_sec,
-            }
+        if self._state == MissionState.DONE:
+            if not self._done_logged:
+                if not self._mode_request_pending and self._last_mode_accepted is None:
+                    self._request_mode(self.MODE_UNLOCK)
+                elif self._mode_response_ready():
+                    self._consume_mode_response()
+                    self._done_logged = True
+                    self._set_status(f'finished ({self._explore_stop_reason})')
+            return
 
-        summary_path = os.path.join(self._save_dir, 'mission_summary.json')
-        with open(summary_path, 'w', encoding='utf-8') as handle:
-            json.dump(summary, handle, indent=2)
-        self.get_logger().info(f'Mission summary written to {summary_path}')
-
-    @staticmethod
-    def _write_merged_pcd(path: str, clouds: List[PointCloud2]):
-        points = []
-        for cloud in clouds:
-            for x, y, z in point_cloud2.read_points(
-                cloud, field_names=('x', 'y', 'z'), skip_nans=True
-            ):
-                points.append((float(x), float(y), float(z)))
-
-        with open(path, 'w', encoding='utf-8') as handle:
-            handle.write('# .PCD v0.7 - Point Cloud Data file format\n')
-            handle.write('VERSION 0.7\n')
-            handle.write('FIELDS x y z\n')
-            handle.write('SIZE 4 4 4\n')
-            handle.write('TYPE F F F\n')
-            handle.write('COUNT 1 1 1\n')
-            handle.write(f'WIDTH {len(points)}\n')
-            handle.write('HEIGHT 1\n')
-            handle.write('VIEWPOINT 0 0 0 1 0 0 0\n')
-            handle.write(f'POINTS {len(points)}\n')
-            handle.write('DATA ascii\n')
-            for x, y, z in points:
-                handle.write(f'{x} {y} {z}\n')
+    def destroy_node(self):
+        self._kill_stack()
+        super().destroy_node()
 
 
 def main(args=None):
