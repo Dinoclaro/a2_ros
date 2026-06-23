@@ -1,7 +1,7 @@
 far_planner:
   ros__parameters:
     # Robot dimensions - tuned for A2 (SMB defaults: robot_dim=0.8, vehicle_height=0.75)
-    robot_dim:      0.45   # A2 body diagonal ~0.45 m
+    robot_dim:      0.55   # A2 body diagonal ~0.45 m
     vehicle_height: 0.5    # A2 standing height ~0.5 m
 
     # Sensor
@@ -13,7 +13,8 @@ far_planner:
     is_pub_boundary: false
 
     # Contour detection
-    voxel_dim: 0.2          # increase to 0.3 if contours are noisy
+    voxel_dim: 0.15          # increase to 0.3 if contours are noisy
+    util/obs_inflate_size: 1
 
     # Goal
     converge_distance: 0.5
