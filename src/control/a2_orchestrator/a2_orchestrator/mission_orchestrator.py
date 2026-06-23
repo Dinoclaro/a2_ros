@@ -76,6 +76,9 @@ class MissionOrchestrator(Node):
         self._detection_enable_pub = self.create_publisher(
             Bool, self._detection_enable_topic, 10
         )
+        self._detection_save_pub = self.create_publisher(
+            Bool, self._detection_save_topic, 10
+        )
 
         self.create_subscription(
             Odometry, self._odom_topic, self._odom_callback, qos_sensor
@@ -123,6 +126,7 @@ class MissionOrchestrator(Node):
         self.declare_parameter('home_goal_z', 0.0)
         self.declare_parameter('investigate_point_topic', '/investigate_point')
         self.declare_parameter('detection_enable_topic', '/detection/enable')
+        self.declare_parameter('detection_save_topic', '/detection/save')
 
     def _load_parameters(self) -> None:
         """Read declared parameters into instance fields and create save_dir."""
@@ -161,6 +165,7 @@ class MissionOrchestrator(Node):
         self._detection_enable_topic = self.get_parameter(
             'detection_enable_topic'
         ).value
+        self._detection_save_topic = self.get_parameter('detection_save_topic').value
 
         os.makedirs(self._save_dir, exist_ok=True)
 
@@ -174,13 +179,14 @@ class MissionOrchestrator(Node):
         self.get_logger().info(f'[{self._state.name}] {detail}')
 
     def _transition(self, new_state: MissionState, detail: str = '') -> None:
-        """Enter ``new_state``, reset state timer, publish status, and sync detection enable."""
+        """Enter ``new_state``, reset state timer, publish status, and sync detection hooks."""
         self._state = new_state
         self._state_entered_mono = time.monotonic()
         self._set_status(detail or new_state.name.lower())
         if new_state in (MissionState.EXPLORING, MissionState.INVESTIGATING):
             self._publish_detection_enable(True)
         elif new_state == MissionState.SAVE_MAP:
+            self._publish_detection_save()
             self._publish_detection_enable(False)
 
     def _elapsed(self) -> float:
@@ -230,6 +236,15 @@ class MissionOrchestrator(Node):
         self.get_logger().info(
             f'Detection processing {"enabled" if enabled else "disabled"} '
             f'on {self._detection_enable_topic}'
+        )
+
+    def _publish_detection_save(self) -> None:
+        """Tell ``detection_processor`` to write tracked detections to CSV before nav home."""
+        msg = Bool()
+        msg.data = True
+        self._detection_save_pub.publish(msg)
+        self.get_logger().info(
+            f'Detection save requested on {self._detection_save_topic}'
         )
 
     @staticmethod

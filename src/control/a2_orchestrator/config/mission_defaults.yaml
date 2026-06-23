@@ -23,3 +23,4 @@ mission_orchestrator:
     home_goal_z: 0.0
     investigate_point_topic: "/investigate_point"
     detection_enable_topic: "/detection/enable"
+    detection_save_topic: "/detection/save"

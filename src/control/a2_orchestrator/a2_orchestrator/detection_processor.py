@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import csv
 import math
-import sys
+import os
 from dataclasses import dataclass
 
 import rclpy
@@ -69,6 +69,7 @@ class DetectionProcessor(Node):
     """Subscribe to ``/detection_info``, track objects, and publish ``/investigate_point``.
 
     Processing is gated by ``/detection/enable`` (published by ``mission_orchestrator``).
+    CSV export is triggered by ``/detection/save`` when exploration ends (before nav home).
     While disabled, detections are ignored so objects visible during stand/walk do not
     trigger investigation. When disabled, tracked objects are cleared.
     """
@@ -80,6 +81,7 @@ class DetectionProcessor(Node):
         self.declare_parameter('detection_info_topic', '/detection_info')
         self.declare_parameter('investigate_point_topic', '/investigate_point')
         self.declare_parameter('detection_enable_topic', '/detection/enable')
+        self.declare_parameter('detection_save_topic', '/detection/save')
         self.declare_parameter('map_frame', 'map')
         self.declare_parameter('output_csv', 'detections.csv')
 
@@ -90,6 +92,7 @@ class DetectionProcessor(Node):
         self._detection_enable_topic = self.get_parameter(
             'detection_enable_topic'
         ).value
+        self._detection_save_topic = self.get_parameter('detection_save_topic').value
         self._map_frame = self.get_parameter('map_frame').value
         self._csv_path = self.get_parameter('output_csv').value
 
@@ -109,6 +112,12 @@ class DetectionProcessor(Node):
             Bool,
             self._detection_enable_topic,
             self._enable_callback,
+            10,
+        )
+        self.create_subscription(
+            Bool,
+            self._detection_save_topic,
+            self._save_callback,
             10,
         )
 
@@ -135,8 +144,15 @@ class DetectionProcessor(Node):
         self.get_logger().info(
             f'DetectionProcessor ready: sub={self._detection_info_topic}, '
             f'pub={self._investigate_point_topic}, '
-            f'enable={self._detection_enable_topic} (waiting for enable)'
+            f'enable={self._detection_enable_topic}, '
+            f'save={self._detection_save_topic} (waiting for enable)'
         )
+
+    def _save_callback(self, msg: Bool) -> None:
+        """Write tracked detections to CSV when commanded by the mission orchestrator."""
+        if not msg.data:
+            return
+        self.write_detections_csv()
 
     def _enable_callback(self, msg: Bool) -> None:
         """Latch enable flag from orchestrator; clear tracks when processing stops."""
@@ -200,9 +216,7 @@ class DetectionProcessor(Node):
         )
 
     def destroy_node(self):
-        """Write aggregated detections CSV on shutdown."""
-        self.write_detections_csv()
-        sys.stdout.flush()
+        """Shut down without writing CSV (orchestrator triggers save via ``/detection/save``)."""
         return super().destroy_node()
 
     def aggregate_close_detections(self) -> list[dict]:
@@ -269,19 +283,26 @@ class DetectionProcessor(Node):
 
         return aggregated
 
-    def write_detections_csv(self) -> None:
-        """Write tracked detections to ``output_csv``."""
+    def write_detections_csv(self) -> bool:
+        """Write aggregated tracked detections to ``output_csv``. Returns True on success."""
+        rows = self.aggregate_close_detections()
+        csv_dir = os.path.dirname(os.path.abspath(self._csv_path))
+        if csv_dir:
+            os.makedirs(csv_dir, exist_ok=True)
         try:
             with open(self._csv_path, 'w', newline='', encoding='utf-8') as csvfile:
                 writer = csv.DictWriter(csvfile, fieldnames=self._csv_headers)
                 writer.writeheader()
-                for data in self.aggregate_close_detections():
+                for data in rows:
                     writer.writerow(data)
-            print(f'Wrote detection CSV to {self._csv_path}')
-            sys.stdout.flush()
         except OSError as ex:
-            print(f'Failed to write detection CSV: {ex}')
-            sys.stdout.flush()
+            self.get_logger().error(f'Failed to write detection CSV: {ex}')
+            return False
+
+        self.get_logger().info(
+            f'Wrote {len(rows)} detection(s) to {self._csv_path}'
+        )
+        return True
 
     def detection_callback(self, msg: ObjectDetectionInfoArray) -> None:
         """Process YOLO detections when enabled; publish investigate or resume signals."""

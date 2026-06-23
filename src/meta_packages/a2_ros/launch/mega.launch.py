@@ -59,7 +59,7 @@ def generate_launch_description():
     )
     object_detection_classes_arg = DeclareLaunchArgument(
         'object_detection_classes',
-        default_value='[39]',
+        default_value='[39, 25]',
         description='COCO class IDs for YOLO detection',
     )
     detection_csv_arg = DeclareLaunchArgument(
@@ -127,6 +127,7 @@ def generate_launch_description():
             'detection_info_topic': '/detection_info',
             'investigate_point_topic': '/investigate_point',
             'detection_enable_topic': '/detection/enable',
+            'detection_save_topic': '/detection/save',
             'map_frame': 'map',
             'output_csv': LaunchConfiguration('detection_csv'),
         }],

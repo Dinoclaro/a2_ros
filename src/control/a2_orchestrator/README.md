@@ -98,7 +98,9 @@ Detection processing is **disabled at startup**. The orchestrator is the sole pu
 |--------------------|---------------------|
 | Node init | `false` |
 | Enter `EXPLORING` or `INVESTIGATING` | `true` |
-| Enter `SAVE_MAP` | `false` |
+| Enter `SAVE_MAP` | `false` (after `/detection/save`) |
+
+**`/detection/save`** (`std_msgs/Bool`): orchestrator publishes `true` when entering `SAVE_MAP` (exploration done, before map save and nav home). `detection_processor` writes `detections.csv` immediately and does **not** wait for node shutdown.
 
 While disabled, `detection_processor` ignores all detections (no tracking, no investigate points). This prevents a object visible during stand/walk from triggering investigation.
 
@@ -145,7 +147,7 @@ On tare→far switch, `waypoint_mux` publishes a stop goal at the current pose b
 | `START_EXPLORE` | `/planner/select` = `tare`, `/start_exploration` = `true` |
 | `EXPLORING` | Wait for `/exploration_finish` or timeout; `/detection/enable` = `true` |
 | `INVESTIGATING` | FAR navigates to detected object; resume via origin on `/investigate_point` |
-| `SAVE_MAP` | `/detection/enable` = `false`; async SavePCD → `clean_map.pcd` |
+| `SAVE_MAP` | `/detection/save` then `/detection/enable` false; async SavePCD → `clean_map.pcd` |
 | `NAV_HOME` | `/planner/select` = `far`, `/goal_point` at home goal (default 0,0,0) |
 | `SIT_DOWN` | Modes 3 → 1 (`BALANCE_STAND` then `STAND_DOWN`) |
 | `DONE` | Mission complete |
@@ -167,6 +169,7 @@ Main ROS node. Publishes:
 | `/goal_point` | `PointStamped` | FAR navigation goal |
 | `/mission/status` | `std_msgs/String` | State machine status |
 | `/detection/enable` | `std_msgs/Bool` | Enable/disable detection processing |
+| `/detection/save` | `std_msgs/Bool` | Write detections CSV (on `SAVE_MAP` entry) |
 
 Subscribes:
 
@@ -178,7 +181,7 @@ Subscribes:
 
 ### `detection_processor.py`
 
-Subscribes to `/detection_info` and `/detection/enable`. When enabled, tracks objects and publishes `/investigate_point`. Writes `detections.csv` on shutdown.
+Subscribes to `/detection_info`, `/detection/enable`, and `/detection/save`. When enabled, tracks objects and publishes `/investigate_point`. Writes `detections.csv` when the orchestrator publishes on `/detection/save` (typically at `SAVE_MAP`, before nav home).
 
 ### `waypoint_mux.py`
 
@@ -207,6 +210,7 @@ Defaults in `config/mission_defaults.yaml`:
 | `planner_select_topic` | `/planner/select` | Mux control topic |
 | `investigate_point_topic` | `/investigate_point` | Investigate/resume signal |
 | `detection_enable_topic` | `/detection/enable` | Enable detection processing |
+| `detection_save_topic` | `/detection/save` | Save detections CSV |
 | `nav_home_timeout_sec` | `600` | Max time for return navigation |
 | `stand_wait_sec` | `4.0` | Pause after stand before unlock |
 | `dlio_save_pcd_service` | `/save_pcd` | Map save service |
