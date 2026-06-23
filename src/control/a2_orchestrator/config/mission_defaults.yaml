@@ -5,23 +5,19 @@ mission_orchestrator:
     save_dir: "/tmp/a2_mission"
     stand_wait_sec: 4.0
     exploration_finish_topic: "/exploration_finish"
-    exploration_timeout_sec: 60.0
+    exploration_timeout_sec: 600.0
     home_arrival_threshold_m: 0.5
-    nav_home_timeout_sec: 60.0
+    nav_home_timeout_sec: 600.0
     skip_home: false
     map_leaf_size: 0.15
-    explore_launch: "launch/exploration.launch.py"
-    nav_launch: "launch/navigation.launch.py"
-    stack_rviz: false
-    lidar_topic: "/front_lidar/points"
-    camera_image_topic: "/camera/image/compressed"
     prereq_timeout_sec: 60.0
     odom_topic: "/state_estimation"
     goal_topic: "/goal_point"
+    planner_select_topic: "/planner/select"
     map_frame: "map"
     status_topic: "/mission/status"
     dlio_save_pcd_service: "/save_pcd"
-    registered_scan_topic: "/registered_scan"
     start_exploration_topic: "/start_exploration"
-    explore_stack_warmup_sec: 10.0
-    explore_stack_ready_timeout_sec: 20.0
+    home_goal_x: 0.0
+    home_goal_y: 0.0
+    home_goal_z: 0.0

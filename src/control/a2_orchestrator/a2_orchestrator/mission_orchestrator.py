@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from typing import Optional
 
 import rclpy
@@ -26,6 +27,7 @@ class MissionOrchestrator(Node):
     MODE_STAND = OperatingMode.STAND_UP
     MODE_UNLOCK = OperatingMode.BALANCE_STAND
     MODE_WALK = OperatingMode.VELOCITY_MOVE
+    MODE_SIT = OperatingMode.STAND_DOWN
 
     def __init__(self) -> None:
         """Declare parameters, create pubs/subs, and start the 0.2 s state timer."""
@@ -34,8 +36,9 @@ class MissionOrchestrator(Node):
         self._load_parameters()
 
         self._state = MissionState.CHECK_PREREQS
-        self._state_entered_at = self.get_clock().now()
-        self._exploring_started_at = None
+        self._node_launched_at = time.monotonic()
+        self._state_entered_mono = time.monotonic()
+        self._exploring_started_mono: Optional[float] = None
         self._explore_stop_reason = ''
 
         self._mode_request_pending = False
@@ -47,9 +50,12 @@ class MissionOrchestrator(Node):
         self._home = Point()
         self._nav_goal_sent = False
         self._map_save_done = False
+        self._map_save_pending = False
+        self._map_save_succeeded: Optional[bool] = None
         self._done_logged = False
         self._start_explore_done = False
         self._nav_setup_done = False
+        self._sit_balance_done = False
 
         qos_sensor = QoSProfile(
             reliability=QoSReliabilityPolicy.BEST_EFFORT,
@@ -74,6 +80,9 @@ class MissionOrchestrator(Node):
         )
 
         self._mode_client = self.create_client(SetOperatingMode, '/a2/set_mode')
+        self._save_pcd_client = self.create_client(
+            SavePCD, self._dlio_save_pcd_service
+        )
         self.create_timer(0.2, self._tick)
         self._set_status('initialized')
 
@@ -147,20 +156,22 @@ class MissionOrchestrator(Node):
     def _transition(self, new_state: MissionState, detail: str = '') -> None:
         """Enter ``new_state``, reset state timer, and publish status."""
         self._state = new_state
-        self._state_entered_at = self.get_clock().now()
+        self._state_entered_mono = time.monotonic()
         self._set_status(detail or new_state.name.lower())
 
     def _elapsed(self) -> float:
-        """Seconds since the current state was entered."""
-        return (self.get_clock().now() - self._state_entered_at).nanoseconds * 1e-9
+        """Seconds since this node was created (wall clock, not sim time)."""
+        return time.monotonic() - self._node_launched_at
+
+    def _state_elapsed(self) -> float:
+        """Seconds since the current state was entered (wall clock)."""
+        return time.monotonic() - self._state_entered_mono
 
     def _exploring_elapsed(self) -> float:
-        """Seconds since exploration started (EXPLORING state)."""
-        if self._exploring_started_at is None:
+        """Seconds since exploration started (wall clock)."""
+        if self._exploring_started_mono is None:
             return 0.0
-        return (
-            self.get_clock().now() - self._exploring_started_at
-        ).nanoseconds * 1e-9
+        return time.monotonic() - self._exploring_started_mono
 
     def _select_planner(self, source: str) -> None:
         """Publish ``tare`` or ``far`` on ``/planner/select`` for waypoint_mux."""
@@ -273,30 +284,53 @@ class MissionOrchestrator(Node):
         dy = self._last_odom.pose.pose.position.y - self._home.y
         return math.hypot(dx, dy)
 
-    def _save_map(self) -> bool:
-        """Call DLIO SavePCD; writes ``{save_dir}/clean_map.pcd`` on success."""
-        client = self.create_client(SavePCD, self._dlio_save_pcd_service)
-        if not client.wait_for_service(timeout_sec=5.0):
-            self.get_logger().error('SavePCD service unavailable')
+    def _request_save_map(self) -> bool:
+        """Async call to DLIO SavePCD; result handled in ``_on_save_map_response``."""
+        if self._map_save_pending or self._map_save_succeeded is not None:
+            return False
+        if not self._save_pcd_client.wait_for_service(timeout_sec=0.0):
+            self.get_logger().warn(
+                f'Waiting for {self._dlio_save_pcd_service}...'
+            )
             return False
 
         req = SavePCD.Request()
         req.leaf_size = float(self._map_leaf_size)
         req.save_path = self._save_dir
+        self._map_save_pending = True
+        future = self._save_pcd_client.call_async(req)
+        future.add_done_callback(self._on_save_map_response)
+        return True
+
+    def _map_save_response_ready(self) -> bool:
+        """True when an async SavePCD request has completed."""
+        return not self._map_save_pending and self._map_save_succeeded is not None
+
+    def _consume_map_save_response(self) -> bool:
+        """Return whether SavePCD succeeded and clear the latch."""
+        succeeded = bool(self._map_save_succeeded)
+        self._map_save_succeeded = None
+        return succeeded
+
+    def _on_save_map_response(self, future) -> None:
+        """Service callback: latch success/failure for ``_tick_save_map``."""
+        self._map_save_pending = False
         try:
-            response = client.call(req)
+            response = future.result()
         except Exception as ex:  # noqa: BLE001
             self.get_logger().error(f'SavePCD failed: {ex}')
-            return False
+            self._map_save_succeeded = False
+            return
 
         if response.success:
             self.get_logger().info(
                 f'Map saved to {self._save_dir}/clean_map.pcd'
             )
-            return True
+            self._map_save_succeeded = True
+            return
 
         self.get_logger().error('SavePCD returned success=False')
-        return False
+        self._map_save_succeeded = False
 
     # ------------------------------------------------------------------ state machine (one _tick_* handler per MissionState)
 
@@ -316,6 +350,7 @@ class MissionOrchestrator(Node):
             MissionState.EXPLORING: self._tick_exploring,
             MissionState.SAVE_MAP: self._tick_save_map,
             MissionState.NAV_HOME: self._tick_nav_home,
+            MissionState.SIT_DOWN: self._tick_sit_down,
             MissionState.DONE: self._tick_done,
         }
         handlers[self._state]()
@@ -349,7 +384,7 @@ class MissionOrchestrator(Node):
 
     def _tick_wait_stand(self) -> None:
         """Pause ``stand_wait_sec`` after stand before unlock. Next: UNLOCK."""
-        if self._elapsed() < self._stand_wait_sec:
+        if self._state_elapsed() < self._stand_wait_sec:
             return
         self._transition(MissionState.UNLOCK)
 
@@ -390,7 +425,7 @@ class MissionOrchestrator(Node):
             self._select_planner('tare')
             self._publish_start_exploration()
             self._start_explore_done = True
-            self._exploring_started_at = self.get_clock().now()
+            self._exploring_started_mono = time.monotonic()
             self._exploration_finished = False
             self._transition(MissionState.EXPLORING, 'exploring')
 
@@ -413,22 +448,33 @@ class MissionOrchestrator(Node):
         )
 
     def _tick_save_map(self) -> None:
-        """Call SavePCD once. Next: NAV_HOME or DONE (if ``skip_home``)."""
+        """Request SavePCD once (async). Next: NAV_HOME, SIT_DOWN, or FAILED."""
         if not self._map_save_done:
-            if not self._save_map():
+            if self._map_save_succeeded is None and not self._map_save_pending:
+                if not self._request_save_map():
+                    if self._state_elapsed() > 5.0:
+                        self._transition(MissionState.FAILED, 'map save failed')
+                    else:
+                        self._set_status('waiting for SavePCD')
+                    return
+            if not self._map_save_response_ready():
+                self._set_status('saving map')
+                return
+            if not self._consume_map_save_response():
                 self._transition(MissionState.FAILED, 'map save failed')
                 return
             self._map_save_done = True
         if self._skip_home:
-            self._transition(MissionState.DONE, 'map saved, skip_home')
+            self._sit_balance_done = False
+            self._transition(MissionState.SIT_DOWN, 'map saved, skip_home')
             return
         self._nav_setup_done = False
         self._nav_goal_sent = False
         self._transition(MissionState.NAV_HOME, 'map saved, navigating home')
 
     def _tick_nav_home(self) -> None:
-        """Once: select FAR and publish home goal; then wait for arrival. Next: DONE or FAILED."""
-        if self._elapsed() > self._nav_home_timeout_sec:
+        """Once: select FAR and publish home goal; then wait for arrival. Next: SIT_DOWN or FAILED."""
+        if self._state_elapsed() > self._nav_home_timeout_sec:
             self._transition(MissionState.FAILED, 'nav home timeout')
             return
 
@@ -442,8 +488,9 @@ class MissionOrchestrator(Node):
 
         dist = self._distance_to_home()
         if dist is not None and dist <= self._home_threshold:
+            self._sit_balance_done = False
             self._transition(
-                MissionState.DONE,
+                MissionState.SIT_DOWN,
                 f'home reached ({dist:.2f} m)',
             )
             return
@@ -453,16 +500,36 @@ class MissionOrchestrator(Node):
         )
         self._set_status(detail)
 
+    def _tick_sit_down(self) -> None:
+        """Stop walking then sit: BALANCE_STAND → STAND_DOWN. Next: DONE."""
+        if not self._sit_balance_done:
+            if not self._mode_request_pending and self._last_mode_accepted is None:
+                self._request_mode(self.MODE_UNLOCK)
+                return
+            if not self._mode_response_ready():
+                return
+            if not self._consume_mode_response():
+                self._transition(MissionState.FAILED, 'sit balance failed')
+                return
+            self._sit_balance_done = True
+            return
+
+        if not self._mode_request_pending and self._last_mode_accepted is None:
+            self._request_mode(self.MODE_SIT)
+            return
+        if not self._mode_response_ready():
+            return
+        if not self._consume_mode_response():
+            self._transition(MissionState.FAILED, 'sit down failed')
+            return
+        self._transition(MissionState.DONE, 'sitting down')
+
     def _tick_done(self) -> None:
-        """Unlock locomotion and publish final status once. Terminal state."""
+        """Publish final status once. Terminal state."""
         if self._done_logged:
             return
-        if not self._mode_request_pending and self._last_mode_accepted is None:
-            self._request_mode(self.MODE_UNLOCK)
-        elif self._mode_response_ready():
-            self._consume_mode_response()
-            self._done_logged = True
-            self._set_status(f'finished ({self._explore_stop_reason})')
+        self._done_logged = True
+        self._set_status(f'finished ({self._explore_stop_reason})')
 
 
 def main(args=None) -> None:

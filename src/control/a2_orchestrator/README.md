@@ -64,7 +64,7 @@ Prerequisites (sim + mega + DLIO)  →  mission_orchestrator
                                                 → explore until finish or timeout
                                                 → save map (SavePCD)
                                                 → select FAR + goal (0,0,0)
-                                                → arrive → done
+                                                → arrive → sit down → done
 ```
 
 ### Motion During Exploration
@@ -96,9 +96,10 @@ On tare→far switch, `waypoint_mux` publishes a stop goal at the current pose b
 | `RECORD_HOME` | Write `{save_dir}/origin.txt` (actual start pose) |
 | `START_EXPLORE` | `/planner/select` = `tare`, `/start_exploration` = `true` |
 | `EXPLORING` | Wait for `/exploration_finish` or timeout |
-| `SAVE_MAP` | Call DLIO `SavePCD` → `clean_map.pcd` |
+| `SAVE_MAP` | Async call to DLIO `SavePCD` → `clean_map.pcd` |
 | `NAV_HOME` | `/planner/select` = `far`, `/goal_point` at home goal (default 0,0,0) |
-| `DONE` | Unlock locomotion |
+| `SIT_DOWN` | Modes 3 → 1 (`BALANCE_STAND` then `STAND_DOWN`) |
+| `DONE` | Mission complete |
 
 Status is published on `/mission/status` as `STATE:detail`.
 
