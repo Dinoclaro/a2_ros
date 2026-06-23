@@ -211,7 +211,6 @@ def generate_launch_description():
                 tare_config,
                 {
                     'use_sim_time': ParameterValue(use_sim_time, value_type=bool),
-                    'kAutoStart': False,
                 },
             ],
         ),
