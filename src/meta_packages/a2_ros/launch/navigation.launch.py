@@ -41,6 +41,7 @@ from launch.launch_description_sources import AnyLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetParameter
 from launch_ros.substitutions import FindPackageShare
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -70,9 +71,13 @@ def generate_launch_description():
 
     nodes = [
         rviz_arg,
+        use_sim_time_arg,
         terrain_arg,
         # Use sim time for all navigation nodes
-        SetParameter(name='use_sim_time', value=False),
+        SetParameter(
+            name='use_sim_time',
+            value=ParameterValue(use_sim_time, value_type=bool),
+        ),
 
         # ---- terrain analysis (local map) ----
         Node(
