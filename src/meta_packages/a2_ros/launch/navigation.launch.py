@@ -35,10 +35,12 @@ Usage:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import AnyLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetParameter
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -53,8 +55,15 @@ def generate_launch_description():
         description='Launch RViz2 with navigation config'
     )
 
+    terrain_arg = DeclareLaunchArgument(
+        'terrain',
+        default_value='indoor',
+        description='Terrain type: indoor, open, rough'
+    )
+
     nodes = [
         rviz_arg,
+        terrain_arg,
         # Use sim time for all navigation nodes
         SetParameter(name='use_sim_time', value=False),
 
@@ -122,89 +131,20 @@ def generate_launch_description():
         ),
 
         # ---- local planner (obstacle avoidance + path following) ----
-        Node(
-            package='local_planner',
-            executable='localPlanner',
-            name='localPlanner',
-            output='screen',
-            parameters=[{
-                'pathFolder':          get_package_share_directory('local_planner') + '/paths',
-                'vehicleLength':       0.65,
-                'vehicleWidth':        0.40,
-                'sensorOffsetX':       0.0,
-                'sensorOffsetY':       0.0,
-                'twoWayDrive':         False,
-                'laserVoxelSize':      0.05,
-                'terrainVoxelSize':    0.2,
-                'useTerrainAnalysis':  True,
-                'checkObstacle':       True,
-                'checkRotObstacle':    True,
-                'adjacentRange':       3.5,
-                'obstacleHeightThre':  0.25,
-                'groundHeightThre':    0.1,
-                'costHeightThre':      0.1,
-                'costScore':           0.02,
-                'useCost':             False,
-                'pointPerPathThre':    2,
-                'minRelZ':             -0.5,
-                'maxRelZ':             0.8,
-                'maxSpeed':            0.5,
-                'dirWeight':           0.1,
-                'dirThre':             90.0,
-                'dirToVehicle':        False,
-                'pathScale':           1.0,
-                'minPathScale':        0.75,
-                'pathScaleStep':       0.25,
-                'pathScaleBySpeed':    True,
-                'minPathRange':        1.0,
-                'pathRangeStep':       0.5,
-                'pathRangeBySpeed':    True,
-                'pathCropByGoal':      True,
-                'autonomyMode':        True,
-                'autonomySpeed':       1.0,
-                'joyToSpeedDelay':     2.0,
-                'joyToCheckObstacleDelay': 5.0,
-                'goalClearRange':      0.4,
-                'goalX':               0.0,
-                'goalY':               0.0,
-            }],
-        ),
-
-        Node(
-            package='local_planner',
-            executable='pathFollower',
-            name='pathFollower',
-            output='screen',
-            parameters=[{
-                'sensorOffsetX':    0.0,
-                'sensorOffsetY':    0.0,
-                'pubSkipNum':       1,
-                'twoWayDrive':      False,
-                'lookAheadDis':     0.4,
-                'yawRateGain':      10.0,
-                'stopYawRateGain':  8.0,
-                'maxYawRate':       45.0,
-                'maxSpeed':         0.5,
-                'maxAccel':         2.0,
-                'switchTimeThre':   1.0,
-                'dirDiffThre':      0.1,
-                'stopDisThre':      0.3,
-                'slowDwnDisThre':   0.6,
-                'useInclRateToSlow': False,
-                'inclRateThre':     120.0,
-                'slowRate1':        0.25,
-                'slowRate2':        0.5,
-                'slowTime1':        2.0,
-                'slowTime2':        2.0,
-                'useInclToStop':    False,
-                'inclThre':         45.0,
-                'stopTime':         5.0,
-                'noRotAtStop':      False,
-                'noRotAtGoal':      True,
-                'autonomyMode':     True,
-                'autonomySpeed':    1.0,
-                'joyToSpeedDelay':  2.0,
-            }],
+        IncludeLaunchDescription(
+            AnyLaunchDescriptionSource(
+                PathJoinSubstitution([
+                    FindPackageShare('local_planner'),
+                    'launch',
+                    PythonExpression(["'local_planner_' + '", LaunchConfiguration('terrain'), "' + '.launch'"])
+                ])
+            ),
+            launch_arguments={
+                'sensorOffsetX': '0.0',
+                'sensorOffsetY': '0.0',
+                'vehicleLength': '0.65',
+                'vehicleWidth': '0.40',
+            }.items()
         ),
 
         # Node(
