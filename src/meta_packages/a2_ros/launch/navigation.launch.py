@@ -39,6 +39,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, SetParameter
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -47,16 +48,26 @@ def generate_launch_description():
     rviz_path       = os.path.join(a2_ros_dir, 'rviz', 'navigation.rviz')
     far_config      = os.path.join(a2_ros_dir, 'config', 'autonomy', 'far_a2.yaml')
 
+    use_sim_time = LaunchConfiguration('use_sim_time')
+
     rviz_arg = DeclareLaunchArgument(
         'rviz',
         default_value='false',
         description='Launch RViz2 with navigation config'
     )
+    use_sim_time_arg = DeclareLaunchArgument(
+        'use_sim_time',
+        default_value='false',
+        description='Use simulation time'
+    )
 
     nodes = [
         rviz_arg,
-        # Use sim time for all navigation nodes
-        SetParameter(name='use_sim_time', value=False),
+        use_sim_time_arg,
+        SetParameter(
+            name='use_sim_time',
+            value=ParameterValue(use_sim_time, value_type=bool),
+        ),
 
         # ---- terrain analysis (local map) ----
         Node(
@@ -240,7 +251,7 @@ def generate_launch_description():
             name='rviz2',
             output='screen',
             arguments=['-d', rviz_path],
-            parameters=[{'use_sim_time': False}],
+            parameters=[{'use_sim_time': ParameterValue(use_sim_time, value_type=bool)}],
             condition=IfCondition(LaunchConfiguration('rviz')),
         ),
     ]
