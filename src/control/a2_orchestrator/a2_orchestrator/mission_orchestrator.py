@@ -480,6 +480,7 @@ class MissionOrchestrator(Node):
 
         if not self._nav_setup_done:
             self._select_planner('far')
+            time.sleep(1)
             self._publish_home_goal()
             self._nav_setup_done = True
             self._nav_goal_sent = True
