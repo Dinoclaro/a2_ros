@@ -1,8 +1,8 @@
 # a2_orchestrator — Autonomous Mission Package
 
-This package runs the **autonomous survey mission**: stand up the robot, explore with TARE, save a DLIO map, and navigate home with FAR.
+This package runs the **autonomous survey mission**: stand up the robot, explore with TARE, optionally investigate detected objects with FAR, save a DLIO map, and navigate home.
 
-The orchestrator assumes the **mega stack** (TARE + FAR + terrain + `waypoint_mux`) is already running. It controls locomotion modes and switches planners via topics — no subprocess stack swapping.
+The orchestrator assumes the **mega stack** (TARE + FAR + terrain + `waypoint_mux`, and optionally detection) is already running. It controls locomotion modes and switches planners via topics — no subprocess stack swapping.
 
 ---
 
@@ -24,7 +24,22 @@ a2 mission save_dir:=/tmp/run1
 ros2 topic echo /mission/status
 ```
 
-Real robot: start `nuc.launch.py` + pc2 bridge, DLIO, and mega stack, then run the orchestrator.
+### With object detection and investigate
+
+```bash
+# Terminal 2 — mega with YOLO + detection_processor
+ros2 launch a2_ros mega.launch.py \
+  use_sim_time:=true \
+  rviz:=false \
+  enable_detection:=true \
+  sim_detection:=true \
+  detection_csv:=/tmp/run1/detections.csv
+
+# Terminal 3 — mission (orchestrator enables detection on EXPLORING entry)
+a2 mission save_dir:=/tmp/run1
+```
+
+Real robot: start `nuc.launch.py` + pc2 bridge, DLIO, and mega stack (`enable_detection:=true`, `sim_detection:=false`), then run the orchestrator.
 
 ---
 
@@ -40,14 +55,13 @@ a2_orchestrator/
 └── a2_orchestrator/
     ├── mission_state.py               ← state enum
     ├── mission_orchestrator.py        ← main state machine node
-    ├── waypoint_mux.py                ← TARE/FAR waypoint multiplexer
-    ├── stack_manager.py               ← legacy (unused by simplified orchestrator)
-    └── detection_logger.py            ← optional CSV detection logger
+    ├── detection_processor.py         ← YOLO → investigate/resume points
+    └── waypoint_mux.py                ← TARE/FAR waypoint multiplexer
 ```
 
 **Prerequisite stack** (in `a2_ros`):
 
-- `mega.launch.py` — terrain, local planner, TARE, FAR, `waypoint_mux`
+- `mega.launch.py` — terrain, local planner, TARE, FAR, `waypoint_mux`, optional detection
 
 ---
 
@@ -61,10 +75,40 @@ Prerequisites (sim + mega + DLIO)  →  mission_orchestrator
                                            └─ state machine:
                                                 stand → unlock → walk
                                                 → select TARE + start exploration
-                                                → explore until finish or timeout
+                                                → explore (and investigate objects)
                                                 → save map (SavePCD)
                                                 → select FAR + goal (0,0,0)
                                                 → arrive → sit down → done
+```
+
+### Object Detection and Investigate
+
+When `enable_detection:=true` in mega launch, two nodes run:
+
+1. **`object_detection_node`** (same as `a2 detect`) — YOLO on `/detection_info`
+2. **`detection_processor`** — tracks objects, publishes `/investigate_point`
+
+Detection processing is **disabled at startup**. The orchestrator is the sole publisher of `/detection/enable`:
+
+| Orchestrator event | `/detection/enable` |
+|--------------------|---------------------|
+| Node init | `false` |
+| Enter `EXPLORING` or `INVESTIGATING` | `true` |
+| Enter `SAVE_MAP` | `false` |
+
+While disabled, `detection_processor` ignores all detections (no tracking, no investigate points). This prevents a object visible during stand/walk from triggering investigation.
+
+**`/investigate_point` signals** (from `detection_processor` → orchestrator):
+
+| Message | Orchestrator action |
+|---------|---------------------|
+| Origin `(0, 0, 0)` | Select TARE, resume `EXPLORING` |
+| Non-zero map point | Select FAR, publish `/goal_point`, enter `INVESTIGATING` |
+
+Manual enable (testing):
+
+```bash
+ros2 topic pub --once /detection/enable std_msgs/msg/Bool "{data: true}"
 ```
 
 ### Motion During Exploration
@@ -75,11 +119,11 @@ tare_planner  →  /tare/way_point  →  waypoint_mux  →  /way_point  →  loc
 
 Orchestrator publishes `/planner/select` = `tare` and `/start_exploration` = `true`.
 
-### Motion During Return Home
+### Motion During Investigate or Return Home
 
 ```
 mission_orchestrator  →  /planner/select far
-                     →  /goal_point (0,0,0)
+                     →  /goal_point (object or home)
 far_planner  →  /far/way_point  →  waypoint_mux  →  /way_point  →  localPlanner  →  ...
 ```
 
@@ -95,8 +139,9 @@ On tare→far switch, `waypoint_mux` publishes a stop goal at the current pose b
 | `STAND` → `WAIT_STAND` → `UNLOCK` → `WALK` | Locomotion mode sequence (2→3→4) |
 | `RECORD_HOME` | Write `{save_dir}/origin.txt` (actual start pose) |
 | `START_EXPLORE` | `/planner/select` = `tare`, `/start_exploration` = `true` |
-| `EXPLORING` | Wait for `/exploration_finish` or timeout |
-| `SAVE_MAP` | Async call to DLIO `SavePCD` → `clean_map.pcd` |
+| `EXPLORING` | Wait for `/exploration_finish` or timeout; `/detection/enable` = `true` |
+| `INVESTIGATING` | FAR navigates to detected object; resume via origin on `/investigate_point` |
+| `SAVE_MAP` | `/detection/enable` = `false`; async SavePCD → `clean_map.pcd` |
 | `NAV_HOME` | `/planner/select` = `far`, `/goal_point` at home goal (default 0,0,0) |
 | `SIT_DOWN` | Modes 3 → 1 (`BALANCE_STAND` then `STAND_DOWN`) |
 | `DONE` | Mission complete |
@@ -117,8 +162,19 @@ Main ROS node. Publishes:
 | `/start_exploration` | `std_msgs/Bool` | Start TARE when `kAutoStart: false` |
 | `/goal_point` | `PointStamped` | FAR navigation goal |
 | `/mission/status` | `std_msgs/String` | State machine status |
+| `/detection/enable` | `std_msgs/Bool` | Enable/disable detection processing |
+
+Subscribes:
+
+| Topic | Message | Purpose |
+|-------|---------|---------|
+| `/investigate_point` | `PointStamped` | Investigate object or resume exploration |
 
 **Do not** `declare_parameter('use_sim_time')` — launch pre-declares it.
+
+### `detection_processor.py`
+
+Subscribes to `/detection_info` and `/detection/enable`. When enabled, tracks objects and publishes `/investigate_point`. Writes `detections.csv` on shutdown.
 
 ### `waypoint_mux.py`
 
@@ -140,14 +196,25 @@ Defaults in `config/mission_defaults.yaml`:
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `save_dir` | `/tmp/a2_mission` | Output directory |
-| `exploration_timeout_sec` | `600` | Max explore time (seconds) |
+| `exploration_timeout_sec` | `600` | Max explore+investigate time (seconds) |
 | `skip_home` | `false` | Skip return navigation after map save |
 | `home_arrival_threshold_m` | `0.5` | Distance to home goal considered "arrived" |
 | `home_goal_x/y/z` | `0.0` | FAR return-home goal in `map` frame |
 | `planner_select_topic` | `/planner/select` | Mux control topic |
+| `investigate_point_topic` | `/investigate_point` | Investigate/resume signal |
+| `detection_enable_topic` | `/detection/enable` | Enable detection processing |
 | `nav_home_timeout_sec` | `600` | Max time for return navigation |
 | `stand_wait_sec` | `4.0` | Pause after stand before unlock |
 | `dlio_save_pcd_service` | `/save_pcd` | Map save service |
+
+Mega launch detection args:
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `enable_detection` | `false` | Start YOLO + detection_processor |
+| `sim_detection` | `false` | Use sim object_detection launch |
+| `object_detection_classes` | `[39]` | COCO class IDs |
+| `detection_csv` | `/tmp/a2_mission/detections.csv` | CSV output path |
 
 Override via launch:
 
@@ -163,6 +230,7 @@ a2 mission save_dir:=/tmp/run1 exploration_timeout_sec:=300 skip_home:=true
 |------|-------------|
 | `origin.txt` | Actual start pose `x y z` |
 | `clean_map.pcd` | DLIO voxel map |
+| `detections.csv` | Tracked object detections (when detection enabled) |
 
 ---
 
@@ -178,6 +246,12 @@ a2 mission save_dir:=/tmp/run1 exploration_timeout_sec:=300 skip_home:=true
 
 - TARE publishes `/exploration_finish` when done
 - Or mission stops at `exploration_timeout_sec`
+
+### Investigate never triggers
+
+1. Launch mega with `enable_detection:=true`
+2. Confirm `/detection/enable` is `true` during `EXPLORING` (orchestrator publishes on state entry)
+3. Check `/detection_info` and `/investigate_point` for traffic
 
 ### Nav home doesn't start
 

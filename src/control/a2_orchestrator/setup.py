@@ -37,7 +37,7 @@ setup(
             'velocity_publisher = a2_orchestrator.velocity_publisher:main',
             'waypoint_mux = a2_orchestrator.waypoint_mux:main',
             'mission_orchestrator = a2_orchestrator.mission_orchestrator:main',
-            'detection_logger = a2_orchestrator.detection_logger:main',
+            'detection_processor = a2_orchestrator.detection_processor:main',
         ],
     },
 )
