@@ -18,7 +18,9 @@ a2 dlio
 ros2 launch a2_ros mega.launch.py use_sim_time:=true rviz:=false
 
 # Terminal 3 — mission orchestrator
-a2 mission save_dir:=/tmp/run1
+ros2 run a2_orchestrator mission_orchestrator --ros-args \
+    -p save_dir:=./runs/runX \
+    -p use_sim_time:=true
 
 # Monitor progress
 ros2 topic echo /mission/status
@@ -36,7 +38,9 @@ ros2 launch a2_ros mega.launch.py \
   detection_csv:=/tmp/run1/detections.csv
 
 # Terminal 3 — mission (orchestrator enables detection on EXPLORING entry)
-a2 mission save_dir:=/tmp/run1
+ros2 run a2_orchestrator mission_orchestrator --ros-args \
+    -p save_dir:=./runs/runX \
+    -p use_sim_time:=true
 ```
 
 Real robot: start `nuc.launch.py` + pc2 bridge, DLIO, and mega stack (`enable_detection:=true`, `sim_detection:=false`), then run the orchestrator.
@@ -213,7 +217,7 @@ Mega launch detection args:
 |----------|---------|-------------|
 | `enable_detection` | `false` | Start YOLO + detection_processor |
 | `sim_detection` | `false` | Use sim object_detection launch |
-| `object_detection_classes` | `[39]` | COCO class IDs |
+| `object_detection_classes` | `[25]` | COCO class IDs (25=umbrella) |
 | `detection_csv` | `/tmp/a2_mission/detections.csv` | CSV output path |
 
 Override via launch:
