@@ -283,6 +283,7 @@ class MissionOrchestrator(Node):
             return
 
         self._select_planner('far')
+        time.sleep(1)
         self._publish_goal_point(msg.point)
         detail = (
             f'investigating object ({msg.point.x:.2f}, '
