@@ -20,6 +20,8 @@ from std_msgs.msg import Bool, String
 
 from a2_orchestrator.mission_state import MissionState
 
+RESUME_ORIGIN_EPSILON = 1e-3
+
 
 class MissionOrchestrator(Node):
     """State machine for locomotion, TARE explore, map save, and FAR return home."""
@@ -71,6 +73,9 @@ class MissionOrchestrator(Node):
         self._start_exploration_pub = self.create_publisher(
             Bool, self._start_exploration_topic, 10
         )
+        self._detection_enable_pub = self.create_publisher(
+            Bool, self._detection_enable_topic, 10
+        )
 
         self.create_subscription(
             Odometry, self._odom_topic, self._odom_callback, qos_sensor
@@ -78,12 +83,19 @@ class MissionOrchestrator(Node):
         self.create_subscription(
             Bool, self._exploration_finish_topic, self._exploration_finish_callback, 10
         )
+        self.create_subscription(
+            PointStamped,
+            self._investigate_point_topic,
+            self._investigate_object_callback,
+            10,
+        )
 
         self._mode_client = self.create_client(SetOperatingMode, '/a2/set_mode')
         self._save_pcd_client = self.create_client(
             SavePCD, self._dlio_save_pcd_service
         )
         self.create_timer(0.2, self._tick)
+        self._publish_detection_enable(False)
         self._set_status('initialized')
 
     # ------------------------------------------------------------------ params
@@ -109,6 +121,8 @@ class MissionOrchestrator(Node):
         self.declare_parameter('home_goal_x', 0.0)
         self.declare_parameter('home_goal_y', 0.0)
         self.declare_parameter('home_goal_z', 0.0)
+        self.declare_parameter('investigate_point_topic', '/investigate_point')
+        self.declare_parameter('detection_enable_topic', '/detection/enable')
 
     def _load_parameters(self) -> None:
         """Read declared parameters into instance fields and create save_dir."""
@@ -141,6 +155,12 @@ class MissionOrchestrator(Node):
             y=float(self.get_parameter('home_goal_y').value),
             z=float(self.get_parameter('home_goal_z').value),
         )
+        self._investigate_point_topic = self.get_parameter(
+            'investigate_point_topic'
+        ).value
+        self._detection_enable_topic = self.get_parameter(
+            'detection_enable_topic'
+        ).value
 
         os.makedirs(self._save_dir, exist_ok=True)
 
@@ -154,10 +174,14 @@ class MissionOrchestrator(Node):
         self.get_logger().info(f'[{self._state.name}] {detail}')
 
     def _transition(self, new_state: MissionState, detail: str = '') -> None:
-        """Enter ``new_state``, reset state timer, and publish status."""
+        """Enter ``new_state``, reset state timer, publish status, and sync detection enable."""
         self._state = new_state
         self._state_entered_mono = time.monotonic()
         self._set_status(detail or new_state.name.lower())
+        if new_state in (MissionState.EXPLORING, MissionState.INVESTIGATING):
+            self._publish_detection_enable(True)
+        elif new_state == MissionState.SAVE_MAP:
+            self._publish_detection_enable(False)
 
     def _elapsed(self) -> float:
         """Seconds since this node was created (wall clock, not sim time)."""
@@ -188,11 +212,45 @@ class MissionOrchestrator(Node):
 
     def _publish_home_goal(self) -> None:
         """Send FAR a ``PointStamped`` goal on ``/goal_point`` (``_home`` from params)."""
+        self._publish_goal_point(self._home)
+
+    def _publish_goal_point(self, point: Point) -> None:
+        """Publish a map-frame goal on ``/goal_point`` for FAR planner."""
         goal = PointStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
         goal.header.frame_id = self._map_frame
-        goal.point = self._home
+        goal.point = point
         self._goal_pub.publish(goal)
+
+    def _publish_detection_enable(self, enabled: bool) -> None:
+        """Tell ``detection_processor`` whether to track detections and publish investigate points."""
+        msg = Bool()
+        msg.data = enabled
+        self._detection_enable_pub.publish(msg)
+        self.get_logger().info(
+            f'Detection processing {"enabled" if enabled else "disabled"} '
+            f'on {self._detection_enable_topic}'
+        )
+
+    @staticmethod
+    def _is_resume_point(msg: PointStamped) -> bool:
+        """Return True when ``msg`` is an empty/origin signal to resume TARE exploration."""
+        return (
+            abs(msg.point.x) < RESUME_ORIGIN_EPSILON
+            and abs(msg.point.y) < RESUME_ORIGIN_EPSILON
+            and abs(msg.point.z) < RESUME_ORIGIN_EPSILON
+        )
+
+    def _check_exploration_timeout(self) -> bool:
+        """Transition to SAVE_MAP on exploration timeout. Returns True if transitioned."""
+        if (
+            self._exploration_timeout_sec > 0.0
+            and self._exploring_elapsed() >= self._exploration_timeout_sec
+        ):
+            self._explore_stop_reason = 'timeout'
+            self._transition(MissionState.SAVE_MAP, 'exploration timeout')
+            return True
+        return False
 
     # ------------------------------------------------------------------ callbacks
 
@@ -208,6 +266,32 @@ class MissionOrchestrator(Node):
         if self._state != MissionState.EXPLORING:
             return
         self._exploration_finished = True
+
+    def _investigate_object_callback(self, msg: PointStamped) -> None:
+        """Handle investigate/resume signals from ``detection_processor`` on ``/investigate_point``.
+
+        Origin point (0,0,0) resumes TARE exploration. Any other point switches to FAR
+        and navigates to the detected object. Only active in EXPLORING or INVESTIGATING.
+        """
+        if self._state not in (MissionState.EXPLORING, MissionState.INVESTIGATING):
+            return
+
+        if self._is_resume_point(msg):
+            self._select_planner('tare')
+            if self._state != MissionState.EXPLORING:
+                self._transition(MissionState.EXPLORING, 'resumed exploration')
+            return
+
+        self._select_planner('far')
+        self._publish_goal_point(msg.point)
+        detail = (
+            f'investigating object ({msg.point.x:.2f}, '
+            f'{msg.point.y:.2f}, {msg.point.z:.2f})'
+        )
+        if self._state != MissionState.INVESTIGATING:
+            self._transition(MissionState.INVESTIGATING, detail)
+        else:
+            self._set_status(detail)
 
     # ------------------------------------------------------------------ mode FSM
 
@@ -348,6 +432,7 @@ class MissionOrchestrator(Node):
             MissionState.RECORD_HOME: self._tick_record_home,
             MissionState.START_EXPLORE: self._tick_start_explore,
             MissionState.EXPLORING: self._tick_exploring,
+            MissionState.INVESTIGATING: self._tick_investigating,
             MissionState.SAVE_MAP: self._tick_save_map,
             MissionState.NAV_HOME: self._tick_nav_home,
             MissionState.SIT_DOWN: self._tick_sit_down,
@@ -430,20 +515,24 @@ class MissionOrchestrator(Node):
             self._transition(MissionState.EXPLORING, 'exploring')
 
     def _tick_exploring(self) -> None:
-        """Wait for ``/exploration_finish`` or ``exploration_timeout_sec``. Next: SAVE_MAP."""
+        """Wait for ``/exploration_finish`` or timeout. Next: SAVE_MAP or INVESTIGATING."""
         if self._exploration_finished:
             self._explore_stop_reason = 'complete'
             self._transition(MissionState.SAVE_MAP, 'exploration complete')
             return
-        if (
-            self._exploration_timeout_sec > 0.0
-            and self._exploring_elapsed() >= self._exploration_timeout_sec
-        ):
-            self._explore_stop_reason = 'timeout'
-            self._transition(MissionState.SAVE_MAP, 'exploration timeout')
+        if self._check_exploration_timeout():
             return
         self._set_status(
             f'exploring ({self._exploring_elapsed():.0f}s, '
+            f'limit={self._exploration_timeout_sec:.0f}s)'
+        )
+
+    def _tick_investigating(self) -> None:
+        """Navigate to a detected object via FAR; resume via origin on ``/investigate_point``."""
+        if self._check_exploration_timeout():
+            return
+        self._set_status(
+            f'investigating ({self._exploring_elapsed():.0f}s, '
             f'limit={self._exploration_timeout_sec:.0f}s)'
         )
 

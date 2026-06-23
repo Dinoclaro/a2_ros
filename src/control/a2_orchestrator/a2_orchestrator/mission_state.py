@@ -14,6 +14,7 @@ class MissionState(Enum):
     RECORD_HOME = auto()
     START_EXPLORE = auto()
     EXPLORING = auto()
+    INVESTIGATING = auto()
     SAVE_MAP = auto()
     NAV_HOME = auto()
     SIT_DOWN = auto()

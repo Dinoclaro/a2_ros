@@ -2,13 +2,14 @@
 Mega autonomy launch: TARE + FAR planners with waypoint mux.
 
 Starts terrain analysis, local planner, path follower, TARE exploration,
-FAR navigation, and waypoint_mux (select active planner via /planner/select).
+FAR navigation, waypoint_mux, and optionally object detection + detection_processor.
 
 Prerequisites (sim.launch.py + a2_bridge):
   /state_estimation, /registered_scan, /clock
 
 Usage:
   ros2 launch a2_ros mega.launch.py rviz:=true use_sim_time:=true
+  ros2 launch a2_ros mega.launch.py use_sim_time:=true enable_detection:=true sim_detection:=true
 
 Switch planner at runtime:
   ros2 topic pub --once /planner/select std_msgs/msg/String "{data: 'far'}"
@@ -18,11 +19,13 @@ Switch planner at runtime:
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.conditions import IfCondition
-from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PathJoinSubstitution, PythonExpression
 from launch_ros.actions import Node, SetParameter
 from launch_ros.parameter_descriptions import ParameterValue
+from launch_ros.substitutions import FindPackageShare
 
 
 def generate_launch_description():
@@ -44,10 +47,98 @@ def generate_launch_description():
         default_value='false',
         description='Use simulation time'
     )
+    enable_detection_arg = DeclareLaunchArgument(
+        'enable_detection',
+        default_value='false',
+        description='Launch YOLO object_detection + detection_processor nodes',
+    )
+    sim_detection_arg = DeclareLaunchArgument(
+        'sim_detection',
+        default_value='false',
+        description='Use sim object_detection launch (uncompressed /camera/image_raw)',
+    )
+    object_detection_classes_arg = DeclareLaunchArgument(
+        'object_detection_classes',
+        default_value='[39]',
+        description='COCO class IDs for YOLO detection',
+    )
+    detection_csv_arg = DeclareLaunchArgument(
+        'detection_csv',
+        default_value='/tmp/a2_mission/detections.csv',
+        description='CSV output path for detection_processor',
+    )
+
+    object_detection_sim = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('object_detection'),
+                'launch',
+                'object_detection.launch.py',
+            ])
+        ),
+        condition=IfCondition(
+            PythonExpression([
+                "'",
+                LaunchConfiguration('enable_detection'),
+                "' == 'true' and '",
+                LaunchConfiguration('sim_detection'),
+                "' == 'true'",
+            ])
+        ),
+        launch_arguments={
+            'object_detection_classes': LaunchConfiguration('object_detection_classes'),
+            'lidar_topic': '/front_lidar/points',
+            'input_camera_name': '/camera',
+        }.items(),
+    )
+
+    object_detection_real = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare('object_detection'),
+                'launch',
+                'object_detection_real.launch.py',
+            ])
+        ),
+        condition=IfCondition(
+            PythonExpression([
+                "'",
+                LaunchConfiguration('enable_detection'),
+                "' == 'true' and '",
+                LaunchConfiguration('sim_detection'),
+                "' != 'true'",
+            ])
+        ),
+        launch_arguments={
+            'object_detection_classes': LaunchConfiguration('object_detection_classes'),
+            'lidar_topic': '/front_lidar/points',
+            'input_camera_name': '/camera',
+            'debayer_image': 'false',
+        }.items(),
+    )
+
+    detection_processor = Node(
+        package='a2_orchestrator',
+        executable='detection_processor',
+        name='detection_processor',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_detection')),
+        parameters=[{
+            'detection_info_topic': '/detection_info',
+            'investigate_point_topic': '/investigate_point',
+            'detection_enable_topic': '/detection/enable',
+            'map_frame': 'map',
+            'output_csv': LaunchConfiguration('detection_csv'),
+        }],
+    )
 
     nodes = [
         rviz_arg,
         use_sim_time_arg,
+        enable_detection_arg,
+        sim_detection_arg,
+        object_detection_classes_arg,
+        detection_csv_arg,
         SetParameter(
             name='use_sim_time',
             value=ParameterValue(use_sim_time, value_type=bool),
@@ -250,6 +341,11 @@ def generate_launch_description():
             }],
         ),
 
+
+        # ---- object detection (optional; gated at runtime via /detection/enable) ----
+        object_detection_sim,
+        object_detection_real,
+        detection_processor,
 
         # ---- RViz ----
         Node(
