@@ -65,7 +65,7 @@ flowchart TB
 
     DET -->|"/detection_info"| LOG
     DLIO -->|"/state_estimation"| ORCH
-    DLIO -->|"/dlio_map_node/save_pcd"| ORCH
+    DLIO -->|"/save_pcd"| ORCH
 ```
 
 ## Mission flow
@@ -73,7 +73,7 @@ flowchart TB
 1. **Stand / unlock / walk** — request locomotion modes via `/a2/set_mode`
 2. **Record origin** — capture home pose from `/state_estimation`, write `origin.txt`
 3. **Explore** — spawn `exploration.launch.py`; run until `/exploration_finish` is true **or** `exploration_timeout_sec` elapses (default 600 s)
-4. **Save map** — call `/dlio_map_node/save_pcd` to write `clean_map.pcd`
+4. **Save map** — call `/save_pcd` to write `clean_map.pcd`
 5. **Nav home** — spawn `navigation.launch.py`, publish home on `/goal_point`; complete when within `home_arrival_threshold_m` of origin (unless `skip_home:=true`)
 
 ### State flow diagram
