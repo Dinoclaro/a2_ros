@@ -1,0 +1,27 @@
+# Default parameters for mission_orchestrator.
+# Loaded by mission.launch.py; launch args override these where noted.
+mission_orchestrator:
+  ros__parameters:
+    save_dir: "/tmp/a2_mission"
+    stand_wait_sec: 6.0
+    exploration_finish_topic: "/exploration_finish"
+    exploration_timeout_sec: 600.0
+    home_arrival_threshold_m: 0.5
+    nav_home_timeout_sec: 600.0
+    skip_home: false
+    map_leaf_size: 0.15
+    explore_launch: "launch/exploration.launch.py"
+    nav_launch: "launch/navigation.launch.py"
+    stack_rviz: false
+    lidar_topic: "/front_lidar/points"
+    camera_image_topic: "/camera/image/compressed"
+    prereq_timeout_sec: 60.0
+    odom_topic: "/state_estimation"
+    goal_topic: "/goal_point"
+    map_frame: "map"
+    status_topic: "/mission/status"
+    dlio_save_pcd_service: "/dlio_map_node/save_pcd"
+    registered_scan_topic: "/registered_scan"
+    start_exploration_topic: "/start_exploration"
+    explore_stack_warmup_sec: 8.0
+    explore_stack_ready_timeout_sec: 45.0
