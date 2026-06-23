@@ -10,7 +10,7 @@ tare_planner_node:
     sub_nogo_boundary_topic_ : /sensor_coverage_planner/nogo_boundary
     sub_joystick_topic_ : /joy
     sub_reset_waypoint_topic_ : /reset_waypoint
-    pub_exploration_finish_topic_ : exploration_finish
+    pub_exploration_finish_topic_ : /exploration_finish
     pub_runtime_breakdown_topic_ : runtime_breakdown
     pub_runtime_topic_ : /runtime
     pub_waypoint_topic_ : /way_point
