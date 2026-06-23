@@ -2,28 +2,34 @@
 Autonomous mission launch: explore until target detected, return home, save map.
 
 Prerequisites (must already be running):
-  - Real robot: pc2 bridge (ros2 launch a2_pc2 pc2.launch.py)
-  - NUC sensors: ros2 launch a2_ros nuc.launch.py
+  Sim:
+    a2 sim                    # mission launch includes DLIO — do NOT also run a2 dlio
+    If you use a2 sim --dlio, pass include_dlio:=false to this launch.
+  Real robot:
+    ros2 launch a2_pc2 pc2.launch.py
+    ros2 launch a2_ros nuc.launch.py
 
 This launch starts:
-  - DLIO odometry + mapping
-  - Object detection
-  - Shared autonomy stack (terrain + local planner + path follower)
-  - TARE exploration + far_planner homing (via waypoint mux)
-  - mission_orchestrator state machine
+  - DLIO odometry + mapping (unless include_dlio:=false)
+  - mission_orchestrator + waypoint mux immediately
+  - Object detection, autonomy, TARE, far_planner after a short delay so stand-up
+    is not starved by heavy node startup
+
+Usage (sim):
+  # Terminal 1
+  a2 sim
+
+  # Terminal 2
+  a2 mission target_class:=bottle save_dir:=/tmp/mission_sim
 
 Usage (real robot):
   ros2 launch a2_ros mission.launch.py target_class:=bottle save_dir:=/tmp/mission_001
-
-Usage (sim — also run: a2 sim --dlio):
-  ros2 launch a2_ros mission.launch.py use_sim_time:=true sim_detection:=true \\
-    target_class:=bottle save_dir:=/tmp/mission_sim
 """
 
 import os
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, TimerAction
 from launch.conditions import IfCondition, UnlessCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
@@ -39,12 +45,18 @@ def generate_launch_description():
     far_config = os.path.join(a2_ros_dir, 'config', 'autonomy', 'far_a2.yaml')
 
     use_sim_time = LaunchConfiguration('use_sim_time')
+    include_dlio = LaunchConfiguration('include_dlio')
 
     declared_arguments = [
         DeclareLaunchArgument(
             'use_sim_time',
             default_value='false',
             description='Use simulation clock (/clock)',
+        ),
+        DeclareLaunchArgument(
+            'include_dlio',
+            default_value='true',
+            description='Start DLIO in this launch (set false if already running, e.g. a2 sim --dlio + a2 dlio)',
         ),
         DeclareLaunchArgument(
             'sim_detection',
@@ -76,12 +88,23 @@ def generate_launch_description():
             default_value='false',
             description='Debayer camera images before detection (real robot)',
         ),
+        DeclareLaunchArgument(
+            'camera_image_topic',
+            default_value='/camera/image/compressed',
+            description='Camera topic for orchestrator prereq check (sim: /camera/image_raw)',
+        ),
+        DeclareLaunchArgument(
+            'planning_delay_sec',
+            default_value='8.0',
+            description='Seconds to wait before starting detection/planning nodes (lets robot stand)',
+        ),
     ]
 
     dlio_launch = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(a2_ros_launch_dir, 'dlio.launch.py'),
         ),
+        condition=IfCondition(include_dlio),
         launch_arguments={
             'use_sim_time': use_sim_time,
             'map_crop_enabled': LaunchConfiguration('map_crop_enabled'),
@@ -172,7 +195,20 @@ def generate_launch_description():
             {
                 'target_class': LaunchConfiguration('target_class'),
                 'save_dir': LaunchConfiguration('save_dir'),
+                'camera_image_topic': LaunchConfiguration('camera_image_topic'),
             },
+        ],
+    )
+
+    # Defer heavy CPU nodes so stand-up is not competing with YOLO/TARE startup.
+    delayed_planning = TimerAction(
+        period=LaunchConfiguration('planning_delay_sec'),
+        actions=[
+            detect_real_launch,
+            detect_sim_launch,
+            autonomy_base,
+            tare_planner,
+            far_planner,
         ],
     )
 
@@ -180,12 +216,8 @@ def generate_launch_description():
         declared_arguments
         + [
             dlio_launch,
-            detect_real_launch,
-            detect_sim_launch,
-            autonomy_base,
-            tare_planner,
-            far_planner,
             waypoint_mux,
             mission_orchestrator,
+            delayed_planning,
         ]
     )

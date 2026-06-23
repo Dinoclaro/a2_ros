@@ -115,6 +115,7 @@ All launch files live in `a2_ros`. Use the `a2` CLI to invoke them:
 | `a2 sim [--rviz] [--dlio] [--headless] [--scene <file>]` | `sim.launch.py` | MuJoCo simulation + locomotion controller |
 | `a2 nav [--rviz]` | `navigation.launch.py` | CMU navigation stack (terrain analysis + path planner) |
 | `a2 explore [--rviz]` | `exploration.launch.py` | Autonomous exploration (TARE planner) |
+| `a2 mission [launch-args]` | `mission.launch.py` | Explore → detect → return home → save map |
 | `a2 dlio [--rviz]` | `dlio.launch.py` | DLIO LiDAR-inertial odometry |
 | `a2 detect` | `object_detection.launch.py` | Object detection (ONNX Runtime); uses `object_detection_real.launch.py` on the robot |
 

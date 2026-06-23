@@ -3,7 +3,7 @@
 mission_orchestrator:
   ros__parameters:
     # Mode sequencing (seconds)
-    stand_wait_sec: 5.0
+    stand_wait_sec: 6.0
     pre_walk_wait_sec: 5.0
 
     # DLIO readiness

@@ -72,6 +72,7 @@ class MissionOrchestrator(Node):
         self._state = MissionState.CHECK_PREREQS
         self._state_entered_at = self.get_clock().now()
         self._mode_request_pending = False
+        self._last_mode_accepted: Optional[bool] = None
         self._map_save_done = False
 
         self._lidar_seen = False
@@ -306,10 +307,12 @@ class MissionOrchestrator(Node):
         )
 
     def _request_mode(self, mode: int) -> bool:
-        if self._mode_request_pending:
+        if self._mode_request_pending or self._last_mode_accepted is not None:
             return False
         if not self._mode_client.wait_for_service(timeout_sec=0.0):
-            self.get_logger().warn('Waiting for /a2/set_mode service...')
+            self.get_logger().warn(
+                'Waiting for /a2/set_mode (is a2 sim or pc2 bridge running?)...'
+            )
             return False
 
         req = SetOperatingMode.Request()
@@ -319,20 +322,36 @@ class MissionOrchestrator(Node):
         future.add_done_callback(lambda f: self._on_mode_response(f, mode))
         return True
 
+    def _mode_response_ready(self) -> bool:
+        return not self._mode_request_pending and self._last_mode_accepted is not None
+
+    def _consume_mode_response(self) -> bool:
+        accepted = bool(self._last_mode_accepted)
+        self._last_mode_accepted = None
+        return accepted
+
     def _on_mode_response(self, future, requested_mode: int):
         self._mode_request_pending = False
         try:
             response = future.result()
         except Exception as ex:  # noqa: BLE001
             self.get_logger().error(f'Mode {requested_mode} call failed: {ex}')
+            self._last_mode_accepted = False
             self._transition(MissionState.FAILED, 'mode service error')
             return
 
-        if not response.success:
-            self.get_logger().error(
-                f'Mode {requested_mode} rejected: {response.message}'
+        self._last_mode_accepted = response.success
+        if response.success:
+            self.get_logger().info(
+                f'Mode {requested_mode} accepted (now {response.current_mode}): '
+                f'{response.message}'
             )
-            self._transition(MissionState.FAILED, response.message)
+            return
+
+        self.get_logger().error(
+            f'Mode {requested_mode} rejected: {response.message}'
+        )
+        self._transition(MissionState.FAILED, response.message)
 
     def _publish_waypoint_source(self, source: str):
         msg = String()
@@ -361,7 +380,10 @@ class MissionOrchestrator(Node):
 
         if self._state == MissionState.CHECK_PREREQS:
             if self._elapsed() > self._prereq_timeout_sec:
-                self._transition(MissionState.FAILED, 'prerequisite timeout')
+                self._transition(
+                    MissionState.FAILED,
+                    'prerequisite timeout (start a2 sim or nuc+pc2 first)',
+                )
                 return
             if not self._mode_client.wait_for_service(timeout_sec=0.0):
                 self._set_status('waiting for /a2/set_mode')
@@ -376,23 +398,31 @@ class MissionOrchestrator(Node):
             return
 
         if self._state == MissionState.STAND:
-            if self._request_mode(self.MODE_STAND):
-                self._transition(MissionState.WAIT_STAND, 'stand requested')
+            if not self._mode_request_pending and self._last_mode_accepted is None:
+                self._request_mode(self.MODE_STAND)
+                return
+            if not self._mode_response_ready():
+                return
+            if not self._consume_mode_response():
+                return
+            self._transition(MissionState.WAIT_STAND, 'stand accepted, waiting for motion')
             return
 
         if self._state == MissionState.WAIT_STAND:
-            if self._mode_request_pending:
-                return
             if self._elapsed() < self._stand_wait_sec:
                 return
             self._transition(MissionState.UNLOCK)
             return
 
         if self._state == MissionState.UNLOCK:
-            if self._mode_request_pending:
+            if not self._mode_request_pending and self._last_mode_accepted is None:
+                self._request_mode(self.MODE_UNLOCK)
                 return
-            if self._request_mode(self.MODE_UNLOCK):
-                self._transition(MissionState.RECORD_HOME, 'unlock requested')
+            if not self._mode_response_ready():
+                return
+            if not self._consume_mode_response():
+                return
+            self._transition(MissionState.RECORD_HOME, 'unlock accepted')
             return
 
         if self._state == MissionState.RECORD_HOME:
@@ -431,10 +461,14 @@ class MissionOrchestrator(Node):
             return
 
         if self._state == MissionState.WALK:
-            if self._mode_request_pending:
+            if not self._mode_request_pending and self._last_mode_accepted is None:
+                self._request_mode(self.MODE_WALK)
                 return
-            if self._request_mode(self.MODE_WALK):
-                self._transition(MissionState.START_EXPLORE, 'walk requested')
+            if not self._mode_response_ready():
+                return
+            if not self._consume_mode_response():
+                return
+            self._transition(MissionState.START_EXPLORE, 'walk accepted')
             return
 
         if self._state == MissionState.START_EXPLORE:
