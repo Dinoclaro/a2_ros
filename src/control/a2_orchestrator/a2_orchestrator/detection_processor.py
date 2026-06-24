@@ -9,6 +9,7 @@ import os
 from dataclasses import dataclass
 
 import rclpy
+from rclpy.time import Time
 import tf2_geometry_msgs
 import tf2_ros
 from geometry_msgs.msg import PointStamped
@@ -16,9 +17,10 @@ from object_detection_msgs.msg import ObjectDetectionInfoArray
 from rclpy.node import Node
 from std_msgs.msg import Bool
 
-WORLD_MATCH_DISTANCE = 3.0
+WORLD_MATCH_DISTANCE_NOISY = 2.0
+WORLD_MATCH_DISTANCE = 1.0
 
-CAMERA_WIDTH = 360.0
+CAMERA_WIDTH = 640.0
 CAMERA_HEIGHT = 640.0
 MIN_BBOX_DIMENSION = 50.0
 
@@ -176,6 +178,9 @@ class DetectionProcessor(Node):
         point.point.y = y
         point.point.z = z
 
+        # Try exact timestamp first, but if unavailable, fall back to the
+        # latest/closest available transform so processing isn't blocked by
+        # strict timestamp matching.
         try:
             transform = self._tf_buffer.lookup_transform(
                 self._map_frame,
@@ -184,17 +189,32 @@ class DetectionProcessor(Node):
             )
             return tf2_geometry_msgs.do_transform_point(point, transform)
         except Exception as ex:  # noqa: BLE001
-            self.get_logger().warn(f'Transform to {self._map_frame} failed: {ex}')
-            return None
+            self.get_logger().warn(
+                f'Exact transform to {self._map_frame} failed: {ex} - trying latest available transform'
+            )
+            try:
+                latest = Time()
+                transform = self._tf_buffer.lookup_transform(
+                    self._map_frame,
+                    point.header.frame_id,
+                    latest,
+                )
+                self.get_logger().info('Using latest available transform as fallback')
+                return tf2_geometry_msgs.do_transform_point(point, transform)
+            except Exception as ex2:  # noqa: BLE001
+                self.get_logger().warn(
+                    f'Fallback transform to {self._map_frame} failed: {ex2}'
+                )
+                return None
 
     def find_matching_object(
         self, class_id: str, x: float, y: float
     ) -> TrackedObject | None:
-        """Return a tracked object of ``class_id`` within ``WORLD_MATCH_DISTANCE`` of (x, y)."""
+        """Return a tracked object of ``class_id`` within ``WORLD_MATCH_DISTANCE_NOISY`` of (x, y)."""
         for obj in self.objects:
             if obj.class_id != class_id:
                 continue
-            if distance_xy(x, y, obj.global_x, obj.global_y) < WORLD_MATCH_DISTANCE:
+            if distance_xy(x, y, obj.global_x, obj.global_y) < WORLD_MATCH_DISTANCE_NOISY:
                 return obj
         return None
 
@@ -233,7 +253,7 @@ class DetectionProcessor(Node):
                     obj.global_y,
                     cluster['global_x'],
                     cluster['global_y'],
-                ) <= WORLD_MATCH_DISTANCE:
+                ) <= WORLD_MATCH_DISTANCE_NOISY:
                     matched_cluster = cluster
                     break
 
