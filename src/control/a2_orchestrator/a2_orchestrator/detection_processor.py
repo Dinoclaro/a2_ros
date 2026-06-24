@@ -19,10 +19,35 @@ from std_msgs.msg import Bool
 
 WORLD_MATCH_DISTANCE_NOISY = 2.0
 WORLD_MATCH_DISTANCE = 1.0
+MIN_BBOX_DIMENSION = 50.0
+
+# Optional class-specific thresholds. Add known classes here as needed.
+CLASS_WORLD_MATCH_DISTANCES: dict[str, float] = {
+    'backpack': 1.5,
+    'umbrella': 1.5,
+    'stop sign': 1.0,
+    'clock': 1.0,
+    'bottle': 0.5,
+}
+CLASS_WORLD_MATCH_DISTANCE_NOISY: dict[str, float] = {
+    'backpack': 2.5,
+    'umbrella': 2.5,
+    'stop sign': 1.5,
+    'clock': 1.5,
+    'bottle': 1.0,
+}
+
+# class : (min_width, min_height)
+CLASS_MIN_BBOX_DIMENSION: dict[str, tuple[float, float]] = {
+    'backpack': (80.0, 80.0),
+    'umbrella': (30.0, 80.0),
+    'stop sign': (50.0, 50.0),
+    'clock': (50.0, 50.0),
+    'bottle': (30.0, 50.0),
+}
 
 CAMERA_WIDTH = 640.0
-CAMERA_HEIGHT = 640.0
-MIN_BBOX_DIMENSION = 50.0
+CAMERA_HEIGHT = 360.0
 
 
 @dataclass
@@ -35,8 +60,6 @@ class TrackedObject:
     global_z: float
     confidence: float
     bbox: tuple
-    pending_confirmation: bool = False
-    continue_sent: bool = False
 
 
 def distance_xy(x1: float, y1: float, x2: float, y2: float) -> float:
@@ -61,10 +84,12 @@ def bbox_near_edge(bbox: tuple, margin: float = 10.0) -> bool:
     )
 
 
-def is_small_bbox(bbox: tuple) -> bool:
-    """Return True when either bbox dimension is below ``MIN_BBOX_DIMENSION``."""
+def is_small_bbox(
+    bbox: tuple, min_width: float = MIN_BBOX_DIMENSION, min_height: float = MIN_BBOX_DIMENSION
+) -> bool:
+    """Return True when either bbox dimension is below the given minimum thresholds."""
     width, height = bbox_dimensions(bbox)
-    return width < MIN_BBOX_DIMENSION or height < MIN_BBOX_DIMENSION
+    return width < min_width or height < min_height
 
 
 class DetectionProcessor(Node):
@@ -129,19 +154,7 @@ class DetectionProcessor(Node):
             10,
         )
 
-        self._csv_headers = [
-            'class_id',
-            'global_x',
-            'global_y',
-            'global_z',
-            'confidence',
-            'bbox_min_x',
-            'bbox_min_y',
-            'bbox_max_x',
-            'bbox_max_y',
-            'pending_confirmation',
-            'continue_sent',
-        ]
+        self._csv_headers = ['class', 'x', 'y', 'z']
 
         self.get_logger().info(
             f'DetectionProcessor ready: sub={self._detection_info_topic}, '
@@ -207,14 +220,25 @@ class DetectionProcessor(Node):
                 )
                 return None
 
+    def get_world_match_distance(self, class_id: str) -> float:
+        """Return the class-specific world match distance, or default when unknown."""
+        return CLASS_WORLD_MATCH_DISTANCES.get(class_id, WORLD_MATCH_DISTANCE)
+
+    def get_world_match_distance_noisy(self, class_id: str) -> float:
+        """Return the class-specific noisy match distance, or default when unknown."""
+        return CLASS_WORLD_MATCH_DISTANCE_NOISY.get(
+            class_id, WORLD_MATCH_DISTANCE_NOISY
+        )
+
     def find_matching_object(
         self, class_id: str, x: float, y: float
     ) -> TrackedObject | None:
-        """Return a tracked object of ``class_id`` within ``WORLD_MATCH_DISTANCE_NOISY`` of (x, y)."""
+        """Return a tracked object of ``class_id`` within the class-specific noisy match distance."""
+        threshold = self.get_world_match_distance_noisy(class_id)
         for obj in self.objects:
             if obj.class_id != class_id:
                 continue
-            if distance_xy(x, y, obj.global_x, obj.global_y) < WORLD_MATCH_DISTANCE_NOISY:
+            if distance_xy(x, y, obj.global_x, obj.global_y) < threshold:
                 return obj
         return None
 
@@ -240,11 +264,12 @@ class DetectionProcessor(Node):
         return super().destroy_node()
 
     def aggregate_close_detections(self) -> list[dict]:
-        """Cluster nearby tracked objects by class for CSV export."""
+        """Cluster nearby tracked objects by class and output simple average positions."""
         clusters: list[dict] = []
 
         for obj in self.objects:
             matched_cluster = None
+            threshold = self.get_world_match_distance(obj.class_id)
             for cluster in clusters:
                 if obj.class_id != cluster['class_id']:
                     continue
@@ -253,7 +278,7 @@ class DetectionProcessor(Node):
                     obj.global_y,
                     cluster['global_x'],
                     cluster['global_y'],
-                ) <= WORLD_MATCH_DISTANCE_NOISY:
+                ) <= threshold:
                     matched_cluster = cluster
                     break
 
@@ -272,32 +297,15 @@ class DetectionProcessor(Node):
         aggregated: list[dict] = []
         for cluster in clusters:
             objs = cluster['objs']
-            total_confidence = sum(o.confidence for o in objs)
-            if total_confidence <= 0.0:
+            if not objs:
                 continue
 
             aggregated.append(
                 {
-                    'class_id': cluster['class_id'],
-                    'global_x': sum(o.global_x * o.confidence for o in objs)
-                    / total_confidence,
-                    'global_y': sum(o.global_y * o.confidence for o in objs)
-                    / total_confidence,
-                    'global_z': sum(o.global_z * o.confidence for o in objs)
-                    / total_confidence,
-                    'confidence': total_confidence / len(objs),
-                    'bbox_min_x': sum(o.bbox[0] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_min_y': sum(o.bbox[1] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_max_x': sum(o.bbox[2] * o.confidence for o in objs)
-                    / total_confidence,
-                    'bbox_max_y': sum(o.bbox[3] * o.confidence for o in objs)
-                    / total_confidence,
-                    'pending_confirmation': any(
-                        o.pending_confirmation for o in objs
-                    ),
-                    'continue_sent': any(o.continue_sent for o in objs),
+                    'class': cluster['class_id'],
+                    'x': sum(o.global_x for o in objs) / len(objs),
+                    'y': sum(o.global_y for o in objs) / len(objs),
+                    'z': sum(o.global_z for o in objs) / len(objs),
                 }
             )
 
@@ -349,7 +357,11 @@ class DetectionProcessor(Node):
                 )
                 continue
 
-            is_small = is_small_bbox(bbox)
+            min_width, min_height = CLASS_MIN_BBOX_DIMENSION.get(
+                detection.class_id,
+                (MIN_BBOX_DIMENSION, MIN_BBOX_DIMENSION),
+            )
+            is_small = is_small_bbox(bbox, min_width, min_height)
             near_edge = bbox_near_edge(bbox)
 
             world_point = self.transform_point_to_map(
